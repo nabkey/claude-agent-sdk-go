@@ -47,7 +47,7 @@ func main() {
 
 ## Basic Usage: Query()
 
-`Query()` is a helper function for querying Claude Code. It returns a read-only channel of response messages. See [query.go](https://www.google.com/search?q=query.go).
+`Query()` is a helper function for querying Claude Code. It returns a read-only channel of response messages. See [query.go](query.go).
 
 ```go
 package main
@@ -120,7 +120,7 @@ options := &claude.AgentOptions{
 
 ## Client
 
-`Client` supports bidirectional, interactive conversations with Claude Code. See [client.go](https://www.google.com/search?q=client.go).
+`Client` supports bidirectional, interactive conversations with Claude Code. See [client.go](client.go).
 
 Unlike `Query()`, the `Client` additionally enables **custom tools** and **hooks**, both of which can be defined as Go functions.
 
@@ -130,7 +130,7 @@ A **custom tool** is a Go function that you can offer to Claude, for Claude to i
 
 Custom tools are implemented as in-process MCP servers that run directly within your Go application, eliminating the need for separate processes that regular MCP servers require.
 
-For an end-to-end example, see [examples/mcp\_calculator/main.go](https://www.google.com/search?q=examples/mcp_calculator/main.go).
+For an end-to-end example, see [examples/mcp\_calculator/main.go](examples/mcp_calculator/main.go).
 
 #### Creating a Simple Tool
 
@@ -280,7 +280,7 @@ options := &claude.AgentOptions{
 
 ## Types
 
-See [types/types.go](https://www.google.com/search?q=types/types.go) for complete type definitions:
+See [types/types.go](types/types.go) for complete type definitions:
 
   - `AgentOptions` - Configuration options
   - `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage` - Message structs
@@ -316,9 +316,9 @@ See the [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-co
 
 ## Examples
 
-See [examples/quick\_start/main.go](https://www.google.com/search?q=examples/quick_start/main.go) for a complete working example.
+See [examples/quick\_start/main.go](examples/quick_start/main.go) for a complete working example.
 
-See [examples/streaming\_mode/main.go](https://www.google.com/search?q=examples/streaming_mode/main.go) for comprehensive examples involving `Client`.
+See [examples/streaming\_mode/main.go](examples/streaming_mode/main.go) for comprehensive examples involving `Client`.
 
 ## Development
 
