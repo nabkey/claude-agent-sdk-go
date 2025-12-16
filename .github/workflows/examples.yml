@@ -13,12 +13,18 @@ jobs:
     environment: test
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Install Claude Code CLI
         run: |
@@ -31,12 +37,14 @@ jobs:
       - name: Build all examples
         run: |
           echo "Building all examples..."
+          mkdir -p bin
           for dir in examples/*/; do
             example_name=$(basename "$dir")
             echo "Building $example_name..."
             go build -o "bin/$example_name" "./$dir"
           done
           echo "All examples built successfully!"
+          ls -la bin/
 
       - name: Run quick_start example
         env:
@@ -46,9 +54,7 @@ jobs:
           echo "Running: quick_start"
           echo "========================================"
           ./bin/quick_start
-          echo ""
           echo "quick_start completed successfully!"
-          echo "========================================"
 
       - name: Run streaming_mode example
         env:
@@ -58,9 +64,7 @@ jobs:
           echo "Running: streaming_mode"
           echo "========================================"
           ./bin/streaming_mode
-          echo ""
           echo "streaming_mode completed successfully!"
-          echo "========================================"
 
       - name: Run system_prompt example
         env:
@@ -70,9 +74,7 @@ jobs:
           echo "Running: system_prompt"
           echo "========================================"
           ./bin/system_prompt
-          echo ""
           echo "system_prompt completed successfully!"
-          echo "========================================"
 
       - name: Run structured_output example
         env:
@@ -82,9 +84,7 @@ jobs:
           echo "Running: structured_output"
           echo "========================================"
           ./bin/structured_output
-          echo ""
           echo "structured_output completed successfully!"
-          echo "========================================"
 
       - name: Run hooks example
         env:
@@ -94,9 +94,7 @@ jobs:
           echo "Running: hooks"
           echo "========================================"
           ./bin/hooks
-          echo ""
           echo "hooks completed successfully!"
-          echo "========================================"
 
       - name: Run mcp_calculator example
         env:
@@ -106,9 +104,7 @@ jobs:
           echo "Running: mcp_calculator"
           echo "========================================"
           ./bin/mcp_calculator
-          echo ""
           echo "mcp_calculator completed successfully!"
-          echo "========================================"
 
       - name: Run tool_permission_callback example
         env:
@@ -118,9 +114,7 @@ jobs:
           echo "Running: tool_permission_callback"
           echo "========================================"
           ./bin/tool_permission_callback
-          echo ""
           echo "tool_permission_callback completed successfully!"
-          echo "========================================"
 
       - name: Run session_resume example
         env:
@@ -130,9 +124,7 @@ jobs:
           echo "Running: session_resume"
           echo "========================================"
           ./bin/session_resume
-          echo ""
           echo "session_resume completed successfully!"
-          echo "========================================"
 
       - name: Summary
         if: always()
@@ -141,4 +133,4 @@ jobs:
           echo "Examples Run Complete"
           echo "========================================"
           echo "All SDK examples have been executed."
-          echo "Check the logs above for detailed output from each example."
+          echo "Check the logs above for detailed output."
