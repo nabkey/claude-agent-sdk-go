@@ -335,27 +335,16 @@ The Go SDK embeds the Claude Code CLI binary or manages its download. The build 
 ```bash
 # Build the project
 go build ./...
-
-# Run linting
-golangci-lint run
 ```
 
 ### Release Workflow
 
-The package is versioned via git tags.
+The package is versioned via git tags:
 
-1.  **Tag the release**:
-
-    ```bash
-    git tag v0.1.0
-    git push origin v0.1.0
-    ```
-
-2.  **The CI workflow will**:
-
-      - Run tests across platforms (Linux, macOS, Windows)
-      - Verify compatibility with the latest Claude Code CLI
-      - Publish documentation
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## License
 
