@@ -322,10 +322,11 @@ See [examples/streaming\_mode/main.go](examples/streaming_mode/main.go) for comp
 
 ## Development
 
-If you're contributing to this project, run the tests to ensure everything is working:
+If you're contributing to this project, run the tests and linter to ensure everything is working:
 
 ```bash
-go test ./...
+make test
+make lint
 ```
 
 ### Building
@@ -333,8 +334,7 @@ go test ./...
 The Go SDK embeds the Claude Code CLI binary or manages its download. The build scripts help verify this integration.
 
 ```bash
-# Build the project
-go build ./...
+make build
 ```
 
 ### Release Workflow
