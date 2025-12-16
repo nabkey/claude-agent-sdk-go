@@ -322,10 +322,11 @@ See [examples/streaming\_mode/main.go](examples/streaming_mode/main.go) for comp
 
 ## Development
 
-If you're contributing to this project, run the tests to ensure everything is working:
+If you're contributing to this project, run the tests and linter to ensure everything is working:
 
 ```bash
-go test ./...
+make test
+make lint
 ```
 
 ### Building
@@ -333,29 +334,17 @@ go test ./...
 The Go SDK embeds the Claude Code CLI binary or manages its download. The build scripts help verify this integration.
 
 ```bash
-# Build the project
-go build ./...
-
-# Run linting
-golangci-lint run
+make build
 ```
 
 ### Release Workflow
 
-The package is versioned via git tags.
+The package is versioned via git tags:
 
-1.  **Tag the release**:
-
-    ```bash
-    git tag v0.1.0
-    git push origin v0.1.0
-    ```
-
-2.  **The CI workflow will**:
-
-      - Run tests across platforms (Linux, macOS, Windows)
-      - Verify compatibility with the latest Claude Code CLI
-      - Publish documentation
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## License
 
