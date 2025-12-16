@@ -46,8 +46,7 @@ type Client struct {
 	mu        sync.Mutex
 
 	// Internal message handling
-	rawMsgChan   <-chan map[string]any // Raw messages from query
-	readerActive bool                   // Whether a reader goroutine is active
+	rawMsgChan <-chan map[string]any // Raw messages from query
 }
 
 // NewClient creates a new Claude SDK client with the given options.
@@ -189,7 +188,7 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 
 	// Initialize control protocol
 	if _, err := c.query.Initialize(ctx); err != nil {
-		c.transport.Close()
+		_ = c.transport.Close()
 		return err
 	}
 
@@ -392,12 +391,12 @@ func (c *Client) Close() error {
 	c.connected = false
 
 	if c.query != nil {
-		c.query.Close()
+		_ = c.query.Close()
 		c.query = nil
 	}
 
 	if c.transport != nil {
-		c.transport.Close()
+		_ = c.transport.Close()
 		c.transport = nil
 	}
 
