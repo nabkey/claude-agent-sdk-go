@@ -344,7 +344,7 @@ func (q *Query) handleControlRequest(ctx context.Context, msg map[string]any) {
 	}
 
 	data, _ := json.Marshal(response)
-	q.transport.Write(ctx, string(data)+"\n")
+	_ = q.transport.Write(ctx, string(data)+"\n")
 }
 
 // handleToolPermission handles tool permission requests.
@@ -363,10 +363,12 @@ func (q *Query) handleToolPermission(ctx context.Context, request map[string]any
 	// Convert suggestions to PermissionUpdate slice
 	for _, s := range suggestions {
 		if sMap, ok := s.(map[string]any); ok {
-			update := types.PermissionUpdate{
-				Type: types.PermissionUpdateType(sMap["type"].(string)),
+			if typeStr, ok := sMap["type"].(string); ok {
+				update := types.PermissionUpdate{
+					Type: types.PermissionUpdateType(typeStr),
+				}
+				permCtx.Suggestions = append(permCtx.Suggestions, update)
 			}
-			permCtx.Suggestions = append(permCtx.Suggestions, update)
 		}
 	}
 
@@ -471,7 +473,7 @@ func (q *Query) sendControlRequest(ctx context.Context, request map[string]any) 
 	// Generate unique request ID
 	counter := atomic.AddInt64(&q.requestCounter, 1)
 	randBytes := make([]byte, 4)
-	rand.Read(randBytes)
+	_, _ = rand.Read(randBytes)
 	requestID := fmt.Sprintf("req_%d_%s", counter, hex.EncodeToString(randBytes))
 
 	// Create response channel

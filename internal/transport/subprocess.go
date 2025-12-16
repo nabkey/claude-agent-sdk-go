@@ -383,12 +383,12 @@ func (t *SubprocessTransport) buildSettingsValue() string {
 	if hasSettings {
 		settingsStr := strings.TrimSpace(*opts.Settings)
 		if strings.HasPrefix(settingsStr, "{") && strings.HasSuffix(settingsStr, "}") {
-			json.Unmarshal([]byte(settingsStr), &settingsObj)
+			_ = json.Unmarshal([]byte(settingsStr), &settingsObj)
 		} else {
 			// It's a file path
 			data, err := os.ReadFile(settingsStr)
 			if err == nil {
-				json.Unmarshal(data, &settingsObj)
+				_ = json.Unmarshal(data, &settingsObj)
 			}
 		}
 	}
@@ -473,7 +473,7 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 
 	// For non-streaming mode, close stdin immediately
 	if !t.isStreaming {
-		t.stdin.Close()
+		_ = t.stdin.Close()
 		t.stdin = nil
 	}
 
@@ -636,21 +636,21 @@ func (t *SubprocessTransport) Close() error {
 	// Close stdin
 	t.writeMu.Lock()
 	if t.stdin != nil {
-		t.stdin.Close()
+		_ = t.stdin.Close()
 		t.stdin = nil
 	}
 	t.writeMu.Unlock()
 
 	// Close stderr
 	if t.stderr != nil {
-		t.stderr.Close()
+		_ = t.stderr.Close()
 		t.stderr = nil
 	}
 
 	// Terminate process
 	if t.cmd != nil && t.cmd.Process != nil {
-		t.cmd.Process.Kill()
-		t.cmd.Wait()
+		_ = t.cmd.Process.Kill()
+		_ = t.cmd.Wait()
 	}
 
 	t.stdout = nil
@@ -699,7 +699,7 @@ func compareVersions(a, b string) int {
 		parts := strings.Split(v, ".")
 		result := make([]int, len(parts))
 		for i, p := range parts {
-			fmt.Sscanf(p, "%d", &result[i])
+			_, _ = fmt.Sscanf(p, "%d", &result[i])
 		}
 		return result
 	}

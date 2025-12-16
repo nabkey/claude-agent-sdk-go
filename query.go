@@ -114,7 +114,7 @@ func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any
 			msgChan <- err
 			return
 		}
-		defer trans.Close()
+		defer func() { _ = trans.Close() }()
 
 		// Connect
 		if err := trans.Connect(ctx); err != nil {
