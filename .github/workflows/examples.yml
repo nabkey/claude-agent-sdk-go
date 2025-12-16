@@ -1,0 +1,144 @@
+name: Run Examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  run-examples:
+    runs-on: ubuntu-latest
+    environment: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Download Go dependencies
+        run: go mod download
+
+      - name: Build all examples
+        run: |
+          echo "Building all examples..."
+          for dir in examples/*/; do
+            example_name=$(basename "$dir")
+            echo "Building $example_name..."
+            go build -o "bin/$example_name" "./$dir"
+          done
+          echo "All examples built successfully!"
+
+      - name: Run quick_start example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: quick_start"
+          echo "========================================"
+          ./bin/quick_start
+          echo ""
+          echo "quick_start completed successfully!"
+          echo "========================================"
+
+      - name: Run streaming_mode example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: streaming_mode"
+          echo "========================================"
+          ./bin/streaming_mode
+          echo ""
+          echo "streaming_mode completed successfully!"
+          echo "========================================"
+
+      - name: Run system_prompt example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: system_prompt"
+          echo "========================================"
+          ./bin/system_prompt
+          echo ""
+          echo "system_prompt completed successfully!"
+          echo "========================================"
+
+      - name: Run structured_output example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: structured_output"
+          echo "========================================"
+          ./bin/structured_output
+          echo ""
+          echo "structured_output completed successfully!"
+          echo "========================================"
+
+      - name: Run hooks example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: hooks"
+          echo "========================================"
+          ./bin/hooks
+          echo ""
+          echo "hooks completed successfully!"
+          echo "========================================"
+
+      - name: Run mcp_calculator example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: mcp_calculator"
+          echo "========================================"
+          ./bin/mcp_calculator
+          echo ""
+          echo "mcp_calculator completed successfully!"
+          echo "========================================"
+
+      - name: Run tool_permission_callback example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: tool_permission_callback"
+          echo "========================================"
+          ./bin/tool_permission_callback
+          echo ""
+          echo "tool_permission_callback completed successfully!"
+          echo "========================================"
+
+      - name: Run session_resume example
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Running: session_resume"
+          echo "========================================"
+          ./bin/session_resume
+          echo ""
+          echo "session_resume completed successfully!"
+          echo "========================================"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "========================================"
+          echo "Examples Run Complete"
+          echo "========================================"
+          echo "All SDK examples have been executed."
+          echo "Check the logs above for detailed output from each example."
