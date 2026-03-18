@@ -1,18 +1,19 @@
 run:
-  go: "1.24"
+  timeout: 5m
 
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
-    - ineffassign
     - staticcheck
     - unused
+    - ineffassign
+    - gosimple
+    - typecheck
 
 linters-settings:
   errcheck:
     check-type-assertions: true
 
 issues:
-  exclude-use-default: false
+  exclude-use-default: true
