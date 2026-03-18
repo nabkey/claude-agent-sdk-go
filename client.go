@@ -134,8 +134,12 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 		Plugins:                  opts.Plugins,
 		ExtraArgs:                opts.ExtraArgs,
 		MaxThinkingTokens:        opts.MaxThinkingTokens,
+		Thinking:                 opts.Thinking,
+		Effort:                   effortToString(opts.Effort),
 		OutputFormat:             opts.OutputFormat,
 		Betas:                    opts.Betas,
+		EnableFileCheckpointing:  opts.EnableFileCheckpointing,
+		MCPConfigPath:            opts.MCPConfigPath,
 		CLIPath:                  opts.CLIPath,
 		Cwd:                      opts.Cwd,
 		Env:                      opts.Env,
@@ -143,6 +147,9 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 		Stderr:                   opts.Stderr,
 		User:                     opts.User,
 		Hooks:                    opts.Hooks,
+		PersistSession:           opts.PersistSession,
+		AgentProgressSummaries:   opts.AgentProgressSummaries,
+		ToolConfig:               opts.ToolConfig,
 	}
 
 	// Create transport (always streaming mode for Client)
@@ -263,7 +270,7 @@ func (c *Client) ReceiveMessages() <-chan types.Message {
 
 		for raw := range c.rawMsgChan {
 			msg, err := protocol.ParseMessage(raw)
-			if err != nil {
+			if err != nil || msg == nil {
 				continue
 			}
 			msgChan <- msg
@@ -303,7 +310,7 @@ func (c *Client) ReceiveResponse() <-chan types.Message {
 		// Read from the stored channel until we get a ResultMessage
 		for raw := range c.rawMsgChan {
 			msg, err := protocol.ParseMessage(raw)
-			if err != nil {
+			if err != nil || msg == nil {
 				continue
 			}
 			msgChan <- msg
@@ -370,6 +377,66 @@ func (c *Client) SetModel(ctx context.Context, model *string) error {
 	}
 
 	return c.query.SetModel(ctx, model)
+}
+
+// StopTask sends a request to stop a running task.
+func (c *Client) StopTask(ctx context.Context, taskID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected || c.query == nil {
+		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+
+	return c.query.StopTask(ctx, taskID)
+}
+
+// RewindFiles sends a request to rewind files to a checkpoint.
+func (c *Client) RewindFiles(ctx context.Context, userMessageID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected || c.query == nil {
+		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+
+	return c.query.RewindFiles(ctx, userMessageID)
+}
+
+// GetMCPStatus retrieves the status of all MCP servers.
+func (c *Client) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected || c.query == nil {
+		return nil, errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+
+	return c.query.GetMCPStatus(ctx)
+}
+
+// ReconnectMCPServer sends a request to reconnect a specific MCP server.
+func (c *Client) ReconnectMCPServer(ctx context.Context, serverName string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected || c.query == nil {
+		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+
+	return c.query.ReconnectMCPServer(ctx, serverName)
+}
+
+// ToggleMCPServer sends a request to enable or disable a specific MCP server.
+func (c *Client) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected || c.query == nil {
+		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+
+	return c.query.ToggleMCPServer(ctx, serverName, enabled)
 }
 
 // GetServerInfo returns the initialization result from the Claude Code server.

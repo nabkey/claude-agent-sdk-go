@@ -25,6 +25,9 @@ type PreToolUseHookInput struct {
 	HookEventName HookEvent      `json:"hook_event_name"` // "PreToolUse"
 	ToolName      string         `json:"tool_name"`
 	ToolInput     map[string]any `json:"tool_input"`
+	AgentID       *string        `json:"agent_id,omitempty"`
+	AgentType     *string        `json:"agent_type,omitempty"`
+	ToolUseID     string         `json:"tool_use_id,omitempty"`
 }
 
 func (p *PreToolUseHookInput) isHookInput()              {}
@@ -37,6 +40,9 @@ type PostToolUseHookInput struct {
 	ToolName      string         `json:"tool_name"`
 	ToolInput     map[string]any `json:"tool_input"`
 	ToolResponse  any            `json:"tool_response"`
+	AgentID       *string        `json:"agent_id,omitempty"`
+	AgentType     *string        `json:"agent_type,omitempty"`
+	ToolUseID     string         `json:"tool_use_id,omitempty"`
 }
 
 func (p *PostToolUseHookInput) isHookInput()              {}
@@ -65,8 +71,11 @@ func (s *StopHookInput) GetHookEventName() HookEvent { return HookEventStop }
 // SubagentStopHookInput is the input for SubagentStop hook events.
 type SubagentStopHookInput struct {
 	BaseHookInput
-	HookEventName  HookEvent `json:"hook_event_name"` // "SubagentStop"
-	StopHookActive bool      `json:"stop_hook_active"`
+	HookEventName       HookEvent `json:"hook_event_name"` // "SubagentStop"
+	StopHookActive      bool      `json:"stop_hook_active"`
+	AgentID             string    `json:"agent_id,omitempty"`
+	AgentTranscriptPath string    `json:"agent_transcript_path,omitempty"`
+	AgentType           string    `json:"agent_type,omitempty"`
 }
 
 func (s *SubagentStopHookInput) isHookInput()              {}
@@ -82,6 +91,54 @@ type PreCompactHookInput struct {
 
 func (p *PreCompactHookInput) isHookInput()              {}
 func (p *PreCompactHookInput) GetHookEventName() HookEvent { return HookEventPreCompact }
+
+// PostToolUseFailureHookInput is the input for PostToolUseFailure hook events.
+type PostToolUseFailureHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent `json:"hook_event_name"` // "PostToolUseFailure"
+	ToolName      string    `json:"tool_name"`
+	ToolInput     string    `json:"tool_input"`
+	Error         string    `json:"error"`
+	IsInterrupt   bool      `json:"is_interrupt"`
+}
+
+func (p *PostToolUseFailureHookInput) isHookInput()              {}
+func (p *PostToolUseFailureHookInput) GetHookEventName() HookEvent { return HookEventPostToolUseFailure }
+
+// SubagentStartHookInput is the input for SubagentStart hook events.
+type SubagentStartHookInput struct {
+	BaseHookInput
+	HookEventName HookEvent `json:"hook_event_name"` // "SubagentStart"
+	AgentID       string    `json:"agent_id"`
+	AgentType     string    `json:"agent_type"`
+}
+
+func (s *SubagentStartHookInput) isHookInput()              {}
+func (s *SubagentStartHookInput) GetHookEventName() HookEvent { return HookEventSubagentStart }
+
+// NotificationHookInput is the input for Notification hook events.
+type NotificationHookInput struct {
+	BaseHookInput
+	HookEventName    HookEvent `json:"hook_event_name"` // "Notification"
+	Message          string    `json:"message"`
+	Title            string    `json:"title"`
+	NotificationType string    `json:"notification_type"`
+}
+
+func (n *NotificationHookInput) isHookInput()              {}
+func (n *NotificationHookInput) GetHookEventName() HookEvent { return HookEventNotification }
+
+// PermissionRequestHookInput is the input for PermissionRequest hook events.
+type PermissionRequestHookInput struct {
+	BaseHookInput
+	HookEventName         HookEvent          `json:"hook_event_name"` // "PermissionRequest"
+	ToolName              string             `json:"tool_name"`
+	ToolInput             map[string]any     `json:"tool_input"`
+	PermissionSuggestions []PermissionUpdate `json:"permission_suggestions,omitempty"`
+}
+
+func (p *PermissionRequestHookInput) isHookInput()              {}
+func (p *PermissionRequestHookInput) GetHookEventName() HookEvent { return HookEventPermissionRequest }
 
 // HookContext provides context for hook callbacks.
 type HookContext struct {
@@ -99,14 +156,16 @@ type PreToolUseHookSpecificOutput struct {
 	PermissionDecision       *string        `json:"permissionDecision,omitempty"` // "allow", "deny", "ask"
 	PermissionDecisionReason *string        `json:"permissionDecisionReason,omitempty"`
 	UpdatedInput             map[string]any `json:"updatedInput,omitempty"`
+	AdditionalContext        *string        `json:"additionalContext,omitempty"`
 }
 
 func (p *PreToolUseHookSpecificOutput) isHookSpecificOutput() {}
 
 // PostToolUseHookSpecificOutput is the hook-specific output for PostToolUse events.
 type PostToolUseHookSpecificOutput struct {
-	HookEventName     string  `json:"hookEventName"` // "PostToolUse"
-	AdditionalContext *string `json:"additionalContext,omitempty"`
+	HookEventName       string  `json:"hookEventName"` // "PostToolUse"
+	AdditionalContext   *string `json:"additionalContext,omitempty"`
+	UpdatedMCPToolOutput any    `json:"updatedMcpToolOutput,omitempty"`
 }
 
 func (p *PostToolUseHookSpecificOutput) isHookSpecificOutput() {}

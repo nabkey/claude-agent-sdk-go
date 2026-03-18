@@ -16,6 +16,7 @@ type Tool struct {
 	Description string
 	InputSchema map[string]any
 	Handler     ToolFunc
+	Annotations map[string]any
 }
 
 // NewTool creates a new MCP tool definition.
@@ -53,6 +54,20 @@ func NewTool(name, description string, inputSchema map[string]any, handler ToolF
 		Description: description,
 		InputSchema: inputSchema,
 		Handler:     handler,
+	}
+}
+
+// NewToolWithAnnotations creates a new MCP tool definition with annotations.
+//
+// Annotations provide metadata about the tool's behavior, such as whether it is
+// read-only, destructive, or accesses external systems.
+func NewToolWithAnnotations(name, description string, inputSchema map[string]any, handler ToolFunc, annotations map[string]any) Tool {
+	return Tool{
+		Name:        name,
+		Description: description,
+		InputSchema: inputSchema,
+		Handler:     handler,
+		Annotations: annotations,
 	}
 }
 

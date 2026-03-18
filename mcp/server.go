@@ -70,6 +70,7 @@ func (s *SDKServer) toHandler() *protocol.MCPServerHandler {
 			Description: t.Description,
 			InputSchema: t.InputSchema,
 			Handler:     t.Handler,
+			Annotations: t.Annotations,
 		}
 	}
 

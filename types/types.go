@@ -1,6 +1,9 @@
 package types
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ContentBlock is a marker interface for message content blocks.
 // Implementations include TextBlock, ThinkingBlock, ToolUseBlock, and ToolResultBlock.
@@ -49,8 +52,10 @@ type Message interface {
 
 // UserMessage represents a user input message.
 type UserMessage struct {
-	Content         any     `json:"content"` // Can be string or []ContentBlock
-	ParentToolUseID *string `json:"parent_tool_use_id,omitempty"`
+	Content         any                `json:"content"` // Can be string or []ContentBlock
+	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
+	UUID            *string            `json:"uuid,omitempty"`
+	ToolUseResult   map[string]any     `json:"tool_use_result,omitempty"`
 }
 
 func (m *UserMessage) isMessage() {}
@@ -61,6 +66,7 @@ type AssistantMessage struct {
 	Model           string                 `json:"model"`
 	ParentToolUseID *string                `json:"parent_tool_use_id,omitempty"`
 	Error           *AssistantMessageError `json:"error,omitempty"`
+	Usage           map[string]any         `json:"usage,omitempty"`
 }
 
 func (m *AssistantMessage) isMessage() {}
@@ -85,6 +91,7 @@ type ResultMessage struct {
 	Usage            map[string]any `json:"usage,omitempty"`
 	Result           *string        `json:"result,omitempty"`
 	StructuredOutput any            `json:"structured_output,omitempty"`
+	StopReason       *string        `json:"stop_reason,omitempty"`
 }
 
 func (m *ResultMessage) isMessage() {}
@@ -225,12 +232,25 @@ type PermissionResultDeny struct {
 
 func (p *PermissionResultDeny) isPermissionResult() {}
 
+// ToolConfiguration defines fine-grained configuration for an individual tool.
+type ToolConfiguration struct {
+	// Enabled controls whether the tool is available.
+	Enabled *bool `json:"enabled,omitempty"`
+	// MaxConcurrency limits concurrent invocations.
+	MaxConcurrency *int `json:"max_concurrency,omitempty"`
+	// Timeout sets a timeout in seconds for tool execution.
+	Timeout *float64 `json:"timeout,omitempty"`
+}
+
 // AgentDefinition defines a custom agent configuration.
 type AgentDefinition struct {
 	Description string   `json:"description"`
 	Prompt      string   `json:"prompt"`
 	Tools       []string `json:"tools,omitempty"`
 	Model       *string  `json:"model,omitempty"` // "sonnet", "opus", "haiku", "inherit"
+	Skills      []string `json:"skills,omitempty"`
+	Memory      *string  `json:"memory,omitempty"`
+	MCPServers  []any    `json:"mcpServers,omitempty"`
 }
 
 // SystemPromptPreset defines a system prompt preset configuration.
@@ -244,4 +264,96 @@ type SystemPromptPreset struct {
 type ToolsPreset struct {
 	Type   string `json:"type"`   // "preset"
 	Preset string `json:"preset"` // "claude_code"
+}
+
+// ThinkingConfig is the interface for thinking configuration types.
+type ThinkingConfig interface {
+	isThinkingConfig()
+}
+
+// ThinkingConfigAdaptive enables adaptive thinking.
+type ThinkingConfigAdaptive struct {
+	Type string `json:"type"` // "adaptive"
+}
+
+func (t *ThinkingConfigAdaptive) isThinkingConfig() {}
+
+// ThinkingConfigEnabled enables thinking with a specific token budget.
+type ThinkingConfigEnabled struct {
+	Type         string `json:"type"`          // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
+func (t *ThinkingConfigEnabled) isThinkingConfig() {}
+
+// ThinkingConfigDisabled disables thinking.
+type ThinkingConfigDisabled struct {
+	Type string `json:"type"` // "disabled"
+}
+
+func (t *ThinkingConfigDisabled) isThinkingConfig() {}
+
+// RateLimitInfo contains rate limit information.
+type RateLimitInfo struct {
+	Status        RateLimitStatus `json:"status"`
+	ResetsAt      *string         `json:"resets_at,omitempty"`
+	RateLimitType *RateLimitType  `json:"rate_limit_type,omitempty"`
+	Utilization   *float64        `json:"utilization,omitempty"`
+}
+
+// RateLimitEvent represents a rate limit event message.
+type RateLimitEvent struct {
+	RateLimitInfo
+	UUID      string `json:"uuid,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+func (m *RateLimitEvent) isMessage() {}
+
+// TaskUsage contains token usage information for a task.
+type TaskUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+// TaskStartedMessage represents a task started system message.
+type TaskStartedMessage struct {
+	SystemMessage
+	TaskID      string `json:"task_id"`
+	Description string `json:"description"`
+	UUID        string `json:"uuid,omitempty"`
+}
+
+// TaskProgressMessage represents a task progress system message.
+type TaskProgressMessage struct {
+	SystemMessage
+	TaskID string    `json:"task_id"`
+	Usage  TaskUsage `json:"usage"`
+}
+
+// TaskNotificationMessage represents a task notification system message.
+type TaskNotificationMessage struct {
+	SystemMessage
+	TaskID    string                 `json:"task_id"`
+	Status    TaskNotificationStatus `json:"status"`
+	ToolUseID string                 `json:"tool_use_id,omitempty"`
+}
+
+// SDKSessionInfo contains information about a session.
+type SDKSessionInfo struct {
+	SessionID   string     `json:"session_id"`
+	CWD         string     `json:"cwd"`
+	FirstPrompt string     `json:"first_prompt"`
+	LastPrompt  string     `json:"last_prompt"`
+	GitBranch   *string    `json:"git_branch,omitempty"`
+	Tag         *string    `json:"tag,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+}
+
+// SessionMessage represents a single message in a session transcript.
+type SessionMessage struct {
+	Type string         `json:"type"`
+	Data map[string]any `json:"data,omitempty"`
 }

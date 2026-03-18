@@ -10,8 +10,8 @@ import (
 // AgentOptions configures the behavior of Query and Client operations.
 type AgentOptions struct {
 	// Tools defines the base set of tools available.
-	// Can be a []string of tool names or nil to use defaults.
-	Tools []string
+	// Can be a []string of tool names, *types.ToolsPreset, or nil to use defaults.
+	Tools any
 
 	// AllowedTools specifies which tools are allowed to be used.
 	AllowedTools []string
@@ -20,8 +20,8 @@ type AgentOptions struct {
 	DisallowedTools []string
 
 	// SystemPrompt sets or replaces the system prompt.
-	// Can be a string or nil to use the default.
-	SystemPrompt *string
+	// Can be a *string, *types.SystemPromptPreset, or nil to use the default.
+	SystemPrompt any
 
 	// AppendSystemPrompt appends to the default system prompt.
 	AppendSystemPrompt *string
@@ -107,14 +107,48 @@ type AgentOptions struct {
 	Plugins []types.PluginConfig
 
 	// MaxThinkingTokens limits tokens for thinking blocks.
+	// Deprecated: Use Thinking instead for more control.
 	MaxThinkingTokens *int
+
+	// Thinking configures thinking/reasoning behavior.
+	Thinking types.ThinkingConfig
+
+	// Effort sets the effort level for the model.
+	Effort *types.EffortLevel
 
 	// OutputFormat configures structured output format.
 	// Example: map[string]any{"type": "json_schema", "schema": ...}
 	OutputFormat map[string]any
 
 	// Betas enables beta features.
-	Betas []string
+	Betas []types.SdkBeta
+
+	// EnableFileCheckpointing enables file checkpointing for rewind support.
+	EnableFileCheckpointing bool
+
+	// MCPConfigPath specifies a path to an MCP config file.
+	MCPConfigPath *string
+
+	// PersistSession controls whether sessions are saved to disk.
+	// When set to false, the --no-session-persistence flag is passed to the CLI.
+	// Default (nil) persists sessions normally.
+	PersistSession *bool
+
+	// AgentProgressSummaries enables AI-generated progress summaries for subagents.
+	AgentProgressSummaries bool
+
+	// ToolConfig provides fine-grained per-tool configuration.
+	// Keys are tool names (e.g., "Bash", "Write").
+	ToolConfig map[string]types.ToolConfiguration
+}
+
+// effortToString converts an EffortLevel pointer to a string pointer for transport.
+func effortToString(e *types.EffortLevel) *string {
+	if e == nil {
+		return nil
+	}
+	s := string(*e)
+	return &s
 }
 
 // CanUseToolCallback is the function signature for tool permission callbacks.
@@ -133,9 +167,15 @@ func DefaultAgentOptions() *AgentOptions {
 	}
 }
 
-// WithSystemPrompt sets the system prompt.
+// WithSystemPrompt sets the system prompt as a string.
 func (o *AgentOptions) WithSystemPrompt(prompt string) *AgentOptions {
 	o.SystemPrompt = &prompt
+	return o
+}
+
+// WithSystemPromptPreset sets a system prompt preset.
+func (o *AgentOptions) WithSystemPromptPreset(preset types.SystemPromptPreset) *AgentOptions {
+	o.SystemPrompt = &preset
 	return o
 }
 
@@ -205,6 +245,52 @@ func (o *AgentOptions) WithCanUseTool(callback CanUseToolCallback) *AgentOptions
 	return o
 }
 
+// WithThinking sets the thinking configuration.
+func (o *AgentOptions) WithThinking(config types.ThinkingConfig) *AgentOptions {
+	o.Thinking = config
+	return o
+}
+
+// WithEffort sets the effort level.
+func (o *AgentOptions) WithEffort(level types.EffortLevel) *AgentOptions {
+	o.Effort = &level
+	return o
+}
+
+// WithFileCheckpointing enables file checkpointing.
+func (o *AgentOptions) WithFileCheckpointing() *AgentOptions {
+	o.EnableFileCheckpointing = true
+	return o
+}
+
+// WithMCPConfigPath sets the MCP config file path.
+func (o *AgentOptions) WithMCPConfigPath(path string) *AgentOptions {
+	o.MCPConfigPath = &path
+	return o
+}
+
+// WithNoPersistSession disables session persistence.
+func (o *AgentOptions) WithNoPersistSession() *AgentOptions {
+	f := false
+	o.PersistSession = &f
+	return o
+}
+
+// WithAgentProgressSummaries enables AI-generated progress summaries for subagents.
+func (o *AgentOptions) WithAgentProgressSummaries() *AgentOptions {
+	o.AgentProgressSummaries = true
+	return o
+}
+
+// WithToolConfig sets configuration for a specific tool.
+func (o *AgentOptions) WithToolConfig(name string, config types.ToolConfiguration) *AgentOptions {
+	if o.ToolConfig == nil {
+		o.ToolConfig = make(map[string]types.ToolConfiguration)
+	}
+	o.ToolConfig[name] = config
+	return o
+}
+
 // WithEnv adds an environment variable.
 func (o *AgentOptions) WithEnv(key, value string) *AgentOptions {
 	if o.Env == nil {
@@ -212,6 +298,22 @@ func (o *AgentOptions) WithEnv(key, value string) *AgentOptions {
 	}
 	o.Env[key] = value
 	return o
+}
+
+// cloneTools clones the Tools field which can be []string or *types.ToolsPreset.
+func cloneTools(tools any) any {
+	if tools == nil {
+		return nil
+	}
+	switch t := tools.(type) {
+	case []string:
+		if t == nil {
+			return nil
+		}
+		return append([]string{}, t...)
+	default:
+		return tools
+	}
 }
 
 // Clone creates a copy of the AgentOptions.
@@ -229,10 +331,10 @@ func (o *AgentOptions) Clone() *AgentOptions {
 	}
 
 	clone := &AgentOptions{
-		Tools:                    cloneStringSlice(o.Tools),
+		Tools:                    cloneTools(o.Tools),
 		AllowedTools:             cloneStringSlice(o.AllowedTools),
 		DisallowedTools:          cloneStringSlice(o.DisallowedTools),
-		SystemPrompt:             o.SystemPrompt,
+		SystemPrompt:             o.SystemPrompt, // *string or *SystemPromptPreset, both are safe to share
 		AppendSystemPrompt:       o.AppendSystemPrompt,
 		PermissionMode:           o.PermissionMode,
 		ContinueConversation:     o.ContinueConversation,
@@ -256,7 +358,17 @@ func (o *AgentOptions) Clone() *AgentOptions {
 		Sandbox:                  o.Sandbox,
 		Plugins:                  append([]types.PluginConfig{}, o.Plugins...),
 		MaxThinkingTokens:        o.MaxThinkingTokens,
-		Betas:                    cloneStringSlice(o.Betas),
+		Thinking:                 o.Thinking,
+		Effort:                   o.Effort,
+		EnableFileCheckpointing:  o.EnableFileCheckpointing,
+		MCPConfigPath:            o.MCPConfigPath,
+		PersistSession:           o.PersistSession,
+		AgentProgressSummaries:   o.AgentProgressSummaries,
+	}
+
+	// Clone Betas
+	if o.Betas != nil {
+		clone.Betas = append([]types.SdkBeta{}, o.Betas...)
 	}
 
 	// Deep copy maps
@@ -299,6 +411,13 @@ func (o *AgentOptions) Clone() *AgentOptions {
 		clone.OutputFormat = make(map[string]any)
 		for k, v := range o.OutputFormat {
 			clone.OutputFormat[k] = v
+		}
+	}
+
+	if o.ToolConfig != nil {
+		clone.ToolConfig = make(map[string]types.ToolConfiguration)
+		for k, v := range o.ToolConfig {
+			clone.ToolConfig[k] = v
 		}
 	}
 

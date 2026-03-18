@@ -84,6 +84,7 @@ type MCPTool struct {
 	Description string
 	InputSchema map[string]any
 	Handler     func(ctx context.Context, args map[string]any) (map[string]any, error)
+	Annotations map[string]any
 }
 
 // QueryOptions configures a new Query instance.
@@ -545,6 +546,99 @@ func (q *Query) SetModel(ctx context.Context, model *string) error {
 	return err
 }
 
+// StopTask sends a request to stop a running task.
+func (q *Query) StopTask(ctx context.Context, taskID string) error {
+	_, err := q.sendControlRequest(ctx, map[string]any{
+		"subtype": "stop_task",
+		"task_id": taskID,
+	})
+	return err
+}
+
+// RewindFiles sends a request to rewind files to a checkpoint.
+func (q *Query) RewindFiles(ctx context.Context, userMessageID string) error {
+	_, err := q.sendControlRequest(ctx, map[string]any{
+		"subtype":         "rewind_files",
+		"user_message_id": userMessageID,
+	})
+	return err
+}
+
+// GetMCPStatus retrieves the status of all MCP servers.
+func (q *Query) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, error) {
+	response, err := q.sendControlRequest(ctx, map[string]any{
+		"subtype": "get_mcp_status",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &types.McpStatusResponse{}
+	if servers, ok := response["servers"].([]any); ok {
+		for _, s := range servers {
+			if sMap, ok := s.(map[string]any); ok {
+				server := types.McpServerStatus{
+					Name:   getString(sMap, "name"),
+					Status: types.McpServerConnectionStatus(getString(sMap, "status")),
+				}
+				if errStr, ok := sMap["error"].(string); ok {
+					server.Error = &errStr
+				}
+				if config, ok := sMap["config"].(map[string]any); ok {
+					server.Config = config
+				}
+				if tools, ok := sMap["tools"].([]any); ok {
+					for _, t := range tools {
+						if tMap, ok := t.(map[string]any); ok {
+							tool := types.McpToolInfo{
+								Name: getString(tMap, "name"),
+							}
+							if desc, ok := tMap["description"].(string); ok {
+								tool.Description = &desc
+							}
+							if annot, ok := tMap["annotations"].(map[string]any); ok {
+								tool.Annotations = &types.McpToolAnnotations{}
+								if v, ok := annot["readOnly"].(bool); ok {
+									tool.Annotations.ReadOnly = &v
+								}
+								if v, ok := annot["destructive"].(bool); ok {
+									tool.Annotations.Destructive = &v
+								}
+								if v, ok := annot["openWorld"].(bool); ok {
+									tool.Annotations.OpenWorld = &v
+								}
+							}
+							server.Tools = append(server.Tools, tool)
+						}
+					}
+				}
+				result.Servers = append(result.Servers, server)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// ReconnectMCPServer sends a request to reconnect a specific MCP server.
+func (q *Query) ReconnectMCPServer(ctx context.Context, serverName string) error {
+	_, err := q.sendControlRequest(ctx, map[string]any{
+		"subtype":     "mcp_reconnect",
+		"server_name": serverName,
+	})
+	return err
+}
+
+// ToggleMCPServer sends a request to enable or disable a specific MCP server.
+func (q *Query) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
+	_, err := q.sendControlRequest(ctx, map[string]any{
+		"subtype":     "mcp_toggle",
+		"server_name": serverName,
+		"enabled":     enabled,
+	})
+	return err
+}
+
 // ReceiveMessages returns a channel for receiving SDK messages.
 func (q *Query) ReceiveMessages() <-chan map[string]any {
 	return q.messageChan
@@ -605,11 +699,15 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 	case "tools/list":
 		tools := make([]map[string]any, len(h.Tools))
 		for i, tool := range h.Tools {
-			tools[i] = map[string]any{
+			toolMap := map[string]any{
 				"name":        tool.Name,
 				"description": tool.Description,
 				"inputSchema": tool.InputSchema,
 			}
+			if tool.Annotations != nil {
+				toolMap["annotations"] = tool.Annotations
+			}
+			tools[i] = toolMap
 		}
 		return map[string]any{
 			"jsonrpc": "2.0",
@@ -685,21 +783,37 @@ func parseHookInput(input any) (types.HookInput, error) {
 
 	switch eventName {
 	case "PreToolUse":
-		return &types.PreToolUseHookInput{
+		input := &types.PreToolUseHookInput{
 			BaseHookInput: base,
 			HookEventName: types.HookEventPreToolUse,
 			ToolName:      getString(data, "tool_name"),
 			ToolInput:     getMap(data, "tool_input"),
-		}, nil
+			ToolUseID:     getString(data, "tool_use_id"),
+		}
+		if v, ok := data["agent_id"].(string); ok {
+			input.AgentID = &v
+		}
+		if v, ok := data["agent_type"].(string); ok {
+			input.AgentType = &v
+		}
+		return input, nil
 
 	case "PostToolUse":
-		return &types.PostToolUseHookInput{
+		input := &types.PostToolUseHookInput{
 			BaseHookInput: base,
 			HookEventName: types.HookEventPostToolUse,
 			ToolName:      getString(data, "tool_name"),
 			ToolInput:     getMap(data, "tool_input"),
 			ToolResponse:  data["tool_response"],
-		}, nil
+			ToolUseID:     getString(data, "tool_use_id"),
+		}
+		if v, ok := data["agent_id"].(string); ok {
+			input.AgentID = &v
+		}
+		if v, ok := data["agent_type"].(string); ok {
+			input.AgentType = &v
+		}
+		return input, nil
 
 	case "UserPromptSubmit":
 		return &types.UserPromptSubmitHookInput{
@@ -717,9 +831,12 @@ func parseHookInput(input any) (types.HookInput, error) {
 
 	case "SubagentStop":
 		return &types.SubagentStopHookInput{
-			BaseHookInput:  base,
-			HookEventName:  types.HookEventSubagentStop,
-			StopHookActive: getBool(data, "stop_hook_active"),
+			BaseHookInput:       base,
+			HookEventName:       types.HookEventSubagentStop,
+			StopHookActive:      getBool(data, "stop_hook_active"),
+			AgentID:             getString(data, "agent_id"),
+			AgentTranscriptPath: getString(data, "agent_transcript_path"),
+			AgentType:           getString(data, "agent_type"),
 		}, nil
 
 	case "PreCompact":
@@ -730,6 +847,52 @@ func parseHookInput(input any) (types.HookInput, error) {
 		}
 		if ci, ok := data["custom_instructions"].(string); ok {
 			input.CustomInstructions = &ci
+		}
+		return input, nil
+
+	case "PostToolUseFailure":
+		return &types.PostToolUseFailureHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventPostToolUseFailure,
+			ToolName:      getString(data, "tool_name"),
+			ToolInput:     getString(data, "tool_input"),
+			Error:         getString(data, "error"),
+			IsInterrupt:   getBool(data, "is_interrupt"),
+		}, nil
+
+	case "SubagentStart":
+		return &types.SubagentStartHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventSubagentStart,
+			AgentID:       getString(data, "agent_id"),
+			AgentType:     getString(data, "agent_type"),
+		}, nil
+
+	case "Notification":
+		return &types.NotificationHookInput{
+			BaseHookInput:    base,
+			HookEventName:    types.HookEventNotification,
+			Message:          getString(data, "message"),
+			Title:            getString(data, "title"),
+			NotificationType: getString(data, "notification_type"),
+		}, nil
+
+	case "PermissionRequest":
+		input := &types.PermissionRequestHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventPermissionRequest,
+			ToolName:      getString(data, "tool_name"),
+			ToolInput:     getMap(data, "tool_input"),
+		}
+		if suggestions, ok := data["permission_suggestions"].([]any); ok {
+			for _, s := range suggestions {
+				if sMap, ok := s.(map[string]any); ok {
+					update := types.PermissionUpdate{
+						Type: types.PermissionUpdateType(getString(sMap, "type")),
+					}
+					input.PermissionSuggestions = append(input.PermissionSuggestions, update)
+				}
+			}
 		}
 		return input, nil
 
@@ -784,12 +947,18 @@ func hookOutputToMap(output *types.HookOutput) map[string]any {
 			if hso.UpdatedInput != nil {
 				hsoMap["updatedInput"] = hso.UpdatedInput
 			}
+			if hso.AdditionalContext != nil {
+				hsoMap["additionalContext"] = *hso.AdditionalContext
+			}
 			result["hookSpecificOutput"] = hsoMap
 
 		case *types.PostToolUseHookSpecificOutput:
 			hsoMap := map[string]any{"hookEventName": hso.HookEventName}
 			if hso.AdditionalContext != nil {
 				hsoMap["additionalContext"] = *hso.AdditionalContext
+			}
+			if hso.UpdatedMCPToolOutput != nil {
+				hsoMap["updatedMcpToolOutput"] = hso.UpdatedMCPToolOutput
 			}
 			result["hookSpecificOutput"] = hsoMap
 

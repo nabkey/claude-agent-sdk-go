@@ -25,8 +25,11 @@ func ParseMessage(data map[string]any) (types.Message, error) {
 		return parseResultMessage(data)
 	case "stream_event":
 		return parseStreamEvent(data)
+	case "rate_limit_event":
+		return parseRateLimitEvent(data)
 	default:
-		return nil, errors.NewMessageParseError("Unknown message type: "+msgType, data)
+		// Forward-compatible: silently skip unknown message types
+		return nil, nil
 	}
 }
 
@@ -35,6 +38,14 @@ func parseUserMessage(data map[string]any) (*types.UserMessage, error) {
 
 	if parentID, ok := data["parent_tool_use_id"].(string); ok {
 		msg.ParentToolUseID = &parentID
+	}
+
+	if uuid, ok := data["uuid"].(string); ok {
+		msg.UUID = &uuid
+	}
+
+	if tur, ok := data["tool_use_result"].(map[string]any); ok {
+		msg.ToolUseResult = tur
 	}
 
 	messageData, ok := data["message"].(map[string]any)
@@ -75,6 +86,10 @@ func parseAssistantMessage(data map[string]any) (*types.AssistantMessage, error)
 
 	msg.Model, _ = messageData["model"].(string)
 
+	if usage, ok := messageData["usage"].(map[string]any); ok {
+		msg.Usage = usage
+	}
+
 	contentRaw, ok := messageData["content"].([]any)
 	if !ok {
 		return nil, errors.NewMessageParseError("Missing 'content' field in assistant message", data)
@@ -89,18 +104,58 @@ func parseAssistantMessage(data map[string]any) (*types.AssistantMessage, error)
 	return msg, nil
 }
 
-func parseSystemMessage(data map[string]any) (*types.SystemMessage, error) {
-	msg := &types.SystemMessage{
-		Data: data,
-	}
-
+func parseSystemMessage(data map[string]any) (types.Message, error) {
 	subtype, ok := data["subtype"].(string)
 	if !ok {
 		return nil, errors.NewMessageParseError("Missing 'subtype' field in system message", data)
 	}
-	msg.Subtype = subtype
 
-	return msg, nil
+	base := types.SystemMessage{
+		Subtype: subtype,
+		Data:    data,
+	}
+
+	switch subtype {
+	case "task_started":
+		return &types.TaskStartedMessage{
+			SystemMessage: base,
+			TaskID:        getString(data, "task_id"),
+			Description:   getString(data, "description"),
+			UUID:          getString(data, "uuid"),
+		}, nil
+
+	case "task_progress":
+		msg := &types.TaskProgressMessage{
+			SystemMessage: base,
+			TaskID:        getString(data, "task_id"),
+		}
+		if usageData, ok := data["usage"].(map[string]any); ok {
+			if v, ok := usageData["input_tokens"].(float64); ok {
+				msg.Usage.InputTokens = int(v)
+			}
+			if v, ok := usageData["output_tokens"].(float64); ok {
+				msg.Usage.OutputTokens = int(v)
+			}
+			if v, ok := usageData["cache_creation_input_tokens"].(float64); ok {
+				msg.Usage.CacheCreationInputTokens = int(v)
+			}
+			if v, ok := usageData["cache_read_input_tokens"].(float64); ok {
+				msg.Usage.CacheReadInputTokens = int(v)
+			}
+		}
+		return msg, nil
+
+	case "task_notification":
+		return &types.TaskNotificationMessage{
+			SystemMessage: base,
+			TaskID:        getString(data, "task_id"),
+			Status:        types.TaskNotificationStatus(getString(data, "status")),
+			ToolUseID:     getString(data, "tool_use_id"),
+		}, nil
+
+	default:
+		return &base, nil
+	}
 }
 
 func parseResultMessage(data map[string]any) (*types.ResultMessage, error) {
@@ -128,7 +183,33 @@ func parseResultMessage(data map[string]any) (*types.ResultMessage, error) {
 	if result, ok := data["result"].(string); ok {
 		msg.Result = &result
 	}
+	if stopReason, ok := data["stop_reason"].(string); ok {
+		msg.StopReason = &stopReason
+	}
 	msg.StructuredOutput = data["structured_output"]
+
+	return msg, nil
+}
+
+func parseRateLimitEvent(data map[string]any) (*types.RateLimitEvent, error) {
+	msg := &types.RateLimitEvent{}
+
+	msg.UUID, _ = data["uuid"].(string)
+	msg.SessionID, _ = data["session_id"].(string)
+
+	if status, ok := data["status"].(string); ok {
+		msg.Status = types.RateLimitStatus(status)
+	}
+	if resetsAt, ok := data["resets_at"].(string); ok {
+		msg.ResetsAt = &resetsAt
+	}
+	if rlt, ok := data["rate_limit_type"].(string); ok {
+		rt := types.RateLimitType(rlt)
+		msg.RateLimitType = &rt
+	}
+	if util, ok := data["utilization"].(float64); ok {
+		msg.Utilization = &util
+	}
 
 	return msg, nil
 }

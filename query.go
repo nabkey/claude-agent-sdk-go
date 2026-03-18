@@ -98,14 +98,21 @@ func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any
 			Plugins:                options.Plugins,
 			ExtraArgs:              options.ExtraArgs,
 			MaxThinkingTokens:      options.MaxThinkingTokens,
+			Thinking:               options.Thinking,
+			Effort:                 effortToString(options.Effort),
 			OutputFormat:           options.OutputFormat,
 			Betas:                  options.Betas,
+			EnableFileCheckpointing: options.EnableFileCheckpointing,
+			MCPConfigPath:          options.MCPConfigPath,
 			CLIPath:                options.CLIPath,
 			Cwd:                    options.Cwd,
 			Env:                    options.Env,
 			MaxBufferSize:          options.MaxBufferSize,
 			Stderr:                 options.Stderr,
 			User:                   options.User,
+			PersistSession:         options.PersistSession,
+			AgentProgressSummaries: options.AgentProgressSummaries,
+			ToolConfig:             options.ToolConfig,
 		}
 
 		// Create transport (non-streaming mode)
@@ -145,6 +152,9 @@ func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any
 				msg, err := protocol.ParseMessage(raw)
 				if err != nil {
 					msgChan <- err
+					continue
+				}
+				if msg == nil {
 					continue
 				}
 

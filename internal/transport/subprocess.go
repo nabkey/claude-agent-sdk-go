@@ -45,11 +45,13 @@ type SubprocessTransport struct {
 // SubprocessOptions contains configuration for the subprocess transport.
 type SubprocessOptions struct {
 	// SystemPrompt sets or replaces the system prompt.
-	SystemPrompt *string
+	// Can be *string or *types.SystemPromptPreset.
+	SystemPrompt any
 	// AppendSystemPrompt appends to the default system prompt.
 	AppendSystemPrompt *string
 	// Tools defines the base set of tools.
-	Tools []string
+	// Can be []string or *types.ToolsPreset.
+	Tools any
 	// AllowedTools specifies allowed tools.
 	AllowedTools []string
 	// DisallowedTools specifies disallowed tools.
@@ -92,10 +94,18 @@ type SubprocessOptions struct {
 	ExtraArgs map[string]*string
 	// MaxThinkingTokens limits thinking tokens.
 	MaxThinkingTokens *int
+	// Thinking configures thinking behavior.
+	Thinking any
+	// Effort sets effort level.
+	Effort *string
 	// OutputFormat configures structured output.
 	OutputFormat map[string]any
 	// Betas enables beta features.
-	Betas []string
+	Betas []types.SdkBeta
+	// EnableFileCheckpointing enables file checkpointing.
+	EnableFileCheckpointing bool
+	// MCPConfigPath specifies MCP config file path.
+	MCPConfigPath *string
 	// CLIPath specifies a custom CLI path.
 	CLIPath *string
 	// Cwd sets the working directory.
@@ -110,6 +120,12 @@ type SubprocessOptions struct {
 	User *string
 	// Hooks configuration (for initialize request)
 	Hooks map[types.HookEvent][]types.HookMatcher
+	// PersistSession controls whether sessions are saved to disk.
+	PersistSession *bool
+	// AgentProgressSummaries enables progress summaries for subagents.
+	AgentProgressSummaries bool
+	// ToolConfig provides per-tool configuration.
+	ToolConfig map[string]types.ToolConfiguration
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -191,21 +207,34 @@ func (t *SubprocessTransport) buildCommand() []string {
 	opts := t.options
 
 	// System prompt handling
-	if opts.SystemPrompt == nil && opts.AppendSystemPrompt == nil {
-		cmd = append(cmd, "--system-prompt", "")
-	} else if opts.SystemPrompt != nil {
-		cmd = append(cmd, "--system-prompt", *opts.SystemPrompt)
-	} else if opts.AppendSystemPrompt != nil {
+	switch sp := opts.SystemPrompt.(type) {
+	case *string:
+		cmd = append(cmd, "--system-prompt", *sp)
+	case *types.SystemPromptPreset:
+		spJSON, _ := json.Marshal(sp)
+		cmd = append(cmd, "--system-prompt", string(spJSON))
+	case nil:
+		if opts.AppendSystemPrompt != nil {
+			cmd = append(cmd, "--append-system-prompt", *opts.AppendSystemPrompt)
+		} else {
+			cmd = append(cmd, "--system-prompt", "")
+		}
+	}
+	if opts.SystemPrompt != nil && opts.AppendSystemPrompt != nil {
 		cmd = append(cmd, "--append-system-prompt", *opts.AppendSystemPrompt)
 	}
 
 	// Tools
-	if opts.Tools != nil {
-		if len(opts.Tools) == 0 {
+	switch t := opts.Tools.(type) {
+	case []string:
+		if len(t) == 0 {
 			cmd = append(cmd, "--tools", "")
 		} else {
-			cmd = append(cmd, "--tools", strings.Join(opts.Tools, ","))
+			cmd = append(cmd, "--tools", strings.Join(t, ","))
 		}
+	case *types.ToolsPreset:
+		toolsJSON, _ := json.Marshal(t)
+		cmd = append(cmd, "--tools", string(toolsJSON))
 	}
 
 	if len(opts.AllowedTools) > 0 {
@@ -233,7 +262,11 @@ func (t *SubprocessTransport) buildCommand() []string {
 	}
 
 	if len(opts.Betas) > 0 {
-		cmd = append(cmd, "--betas", strings.Join(opts.Betas, ","))
+		betaStrs := make([]string, len(opts.Betas))
+		for i, b := range opts.Betas {
+			betaStrs[i] = string(b)
+		}
+		cmd = append(cmd, "--betas", strings.Join(betaStrs, ","))
 	}
 
 	if opts.PermissionPromptToolName != nil {
@@ -306,6 +339,15 @@ func (t *SubprocessTransport) buildCommand() []string {
 			if agent.Model != nil {
 				agentMap["model"] = *agent.Model
 			}
+			if agent.Skills != nil {
+				agentMap["skills"] = agent.Skills
+			}
+			if agent.Memory != nil {
+				agentMap["memory"] = *agent.Memory
+			}
+			if agent.MCPServers != nil {
+				agentMap["mcpServers"] = agent.MCPServers
+			}
 			agentsMap[name] = agentMap
 		}
 		agentsJSON, _ := json.Marshal(agentsMap)
@@ -341,6 +383,37 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.MaxThinkingTokens != nil {
 		cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *opts.MaxThinkingTokens))
+	}
+
+	if opts.Thinking != nil {
+		thinkingJSON, _ := json.Marshal(opts.Thinking)
+		cmd = append(cmd, "--thinking", string(thinkingJSON))
+	}
+
+	if opts.Effort != nil {
+		cmd = append(cmd, "--effort", *opts.Effort)
+	}
+
+	if opts.EnableFileCheckpointing {
+		cmd = append(cmd, "--enable-file-checkpointing")
+	}
+
+	// MCPConfigPath is only used when MCPServers is not set
+	if opts.MCPConfigPath != nil && len(opts.MCPServers) == 0 {
+		cmd = append(cmd, "--mcp-config", *opts.MCPConfigPath)
+	}
+
+	if opts.PersistSession != nil && !*opts.PersistSession {
+		cmd = append(cmd, "--no-session-persistence")
+	}
+
+	if opts.AgentProgressSummaries {
+		cmd = append(cmd, "--agent-progress-summaries")
+	}
+
+	if len(opts.ToolConfig) > 0 {
+		tcJSON, _ := json.Marshal(opts.ToolConfig)
+		cmd = append(cmd, "--tool-config", string(tcJSON))
 	}
 
 	// Output format / JSON schema

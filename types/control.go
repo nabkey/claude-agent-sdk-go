@@ -70,6 +70,36 @@ type SDKControlMCPMessageRequest struct {
 	Message    map[string]any `json:"message"`
 }
 
+// SDKControlStopTaskRequest is a request to stop a running task.
+type SDKControlStopTaskRequest struct {
+	Subtype string `json:"subtype"` // "stop_task"
+	TaskID  string `json:"task_id"`
+}
+
+// SDKControlRewindFilesRequest is a request to rewind files to a checkpoint.
+type SDKControlRewindFilesRequest struct {
+	Subtype       string `json:"subtype"` // "rewind_files"
+	UserMessageID string `json:"user_message_id"`
+}
+
+// SDKControlMcpReconnectRequest is a request to reconnect an MCP server.
+type SDKControlMcpReconnectRequest struct {
+	Subtype    string `json:"subtype"` // "mcp_reconnect"
+	ServerName string `json:"server_name"`
+}
+
+// SDKControlMcpToggleRequest is a request to enable/disable an MCP server.
+type SDKControlMcpToggleRequest struct {
+	Subtype    string `json:"subtype"` // "mcp_toggle"
+	ServerName string `json:"server_name"`
+	Enabled    bool   `json:"enabled"`
+}
+
+// SDKControlGetMcpStatusRequest is a request to get MCP server status.
+type SDKControlGetMcpStatusRequest struct {
+	Subtype string `json:"subtype"` // "get_mcp_status"
+}
+
 // UserInputMessage is a user message sent to the CLI in streaming mode.
 type UserInputMessage struct {
 	Type            string         `json:"type"` // "user"
