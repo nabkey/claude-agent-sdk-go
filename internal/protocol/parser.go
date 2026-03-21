@@ -117,41 +117,52 @@ func parseSystemMessage(data map[string]any) (types.Message, error) {
 
 	switch subtype {
 	case "task_started":
-		return &types.TaskStartedMessage{
+		msg := &types.TaskStartedMessage{
 			SystemMessage: base,
 			TaskID:        getString(data, "task_id"),
 			Description:   getString(data, "description"),
 			UUID:          getString(data, "uuid"),
-		}, nil
+			SessionID:     getString(data, "session_id"),
+			ToolUseID:     getString(data, "tool_use_id"),
+		}
+		if taskType, ok := data["task_type"].(string); ok {
+			msg.TaskType = &taskType
+		}
+		return msg, nil
 
 	case "task_progress":
 		msg := &types.TaskProgressMessage{
 			SystemMessage: base,
 			TaskID:        getString(data, "task_id"),
+			Description:   getString(data, "description"),
+			UUID:          getString(data, "uuid"),
+			SessionID:     getString(data, "session_id"),
+			ToolUseID:     getString(data, "tool_use_id"),
+		}
+		if lastToolName, ok := data["last_tool_name"].(string); ok {
+			msg.LastToolName = &lastToolName
 		}
 		if usageData, ok := data["usage"].(map[string]any); ok {
-			if v, ok := usageData["input_tokens"].(float64); ok {
-				msg.Usage.InputTokens = int(v)
-			}
-			if v, ok := usageData["output_tokens"].(float64); ok {
-				msg.Usage.OutputTokens = int(v)
-			}
-			if v, ok := usageData["cache_creation_input_tokens"].(float64); ok {
-				msg.Usage.CacheCreationInputTokens = int(v)
-			}
-			if v, ok := usageData["cache_read_input_tokens"].(float64); ok {
-				msg.Usage.CacheReadInputTokens = int(v)
-			}
+			msg.Usage = parseTaskUsage(usageData)
 		}
 		return msg, nil
 
 	case "task_notification":
-		return &types.TaskNotificationMessage{
+		msg := &types.TaskNotificationMessage{
 			SystemMessage: base,
 			TaskID:        getString(data, "task_id"),
 			Status:        types.TaskNotificationStatus(getString(data, "status")),
+			OutputFile:    getString(data, "output_file"),
+			Summary:       getString(data, "summary"),
+			UUID:          getString(data, "uuid"),
+			SessionID:     getString(data, "session_id"),
 			ToolUseID:     getString(data, "tool_use_id"),
-		}, nil
+		}
+		if usageData, ok := data["usage"].(map[string]any); ok {
+			usage := parseTaskUsage(usageData)
+			msg.Usage = &usage
+		}
+		return msg, nil
 
 	default:
 		return &base, nil
@@ -197,19 +208,38 @@ func parseRateLimitEvent(data map[string]any) (*types.RateLimitEvent, error) {
 	msg.UUID, _ = data["uuid"].(string)
 	msg.SessionID, _ = data["session_id"].(string)
 
-	if status, ok := data["status"].(string); ok {
+	// Rate limit info may be nested under "rate_limit_info" or at the top level.
+	info := data
+	if nested, ok := data["rate_limit_info"].(map[string]any); ok {
+		info = nested
+	}
+
+	if status, ok := info["status"].(string); ok {
 		msg.Status = types.RateLimitStatus(status)
 	}
-	if resetsAt, ok := data["resets_at"].(string); ok {
+	// Wire format uses camelCase for nested fields.
+	if resetsAt, ok := getStringAny(info, "resets_at", "resetsAt"); ok {
 		msg.ResetsAt = &resetsAt
 	}
-	if rlt, ok := data["rate_limit_type"].(string); ok {
+	if rlt, ok := getStringAny(info, "rate_limit_type", "rateLimitType"); ok {
 		rt := types.RateLimitType(rlt)
 		msg.RateLimitType = &rt
 	}
-	if util, ok := data["utilization"].(float64); ok {
+	if util, ok := info["utilization"].(float64); ok {
 		msg.Utilization = &util
 	}
+	if overageStatus, ok := getStringAny(info, "overage_status", "overageStatus"); ok {
+		os := types.RateLimitStatus(overageStatus)
+		msg.OverageStatus = &os
+	}
+	if overageResetsAt, ok := getFloat64Any(info, "overage_resets_at", "overageResetsAt"); ok {
+		v := int64(overageResetsAt)
+		msg.OverageResetsAt = &v
+	}
+	if reason, ok := getStringAny(info, "overage_disabled_reason", "overageDisabledReason"); ok {
+		msg.OverageDisabledReason = &reason
+	}
+	msg.Raw = info
 
 	return msg, nil
 }
@@ -229,6 +259,44 @@ func parseStreamEvent(data map[string]any) (*types.StreamEvent, error) {
 	}
 
 	return msg, nil
+}
+
+// getStringAny tries multiple keys and returns the first string value found.
+func getStringAny(data map[string]any, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if v, ok := data[key].(string); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// getFloat64Any tries multiple keys and returns the first float64 value found.
+func getFloat64Any(data map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if v, ok := data[key].(float64); ok {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// parseTaskUsage extracts TaskUsage from a map.
+func parseTaskUsage(data map[string]any) types.TaskUsage {
+	var usage types.TaskUsage
+	if v, ok := data["input_tokens"].(float64); ok {
+		usage.InputTokens = int(v)
+	}
+	if v, ok := data["output_tokens"].(float64); ok {
+		usage.OutputTokens = int(v)
+	}
+	if v, ok := data["cache_creation_input_tokens"].(float64); ok {
+		usage.CacheCreationInputTokens = int(v)
+	}
+	if v, ok := data["cache_read_input_tokens"].(float64); ok {
+		usage.CacheReadInputTokens = int(v)
+	}
+	return usage
 }
 
 func parseContentBlocks(rawBlocks []any) ([]types.ContentBlock, error) {

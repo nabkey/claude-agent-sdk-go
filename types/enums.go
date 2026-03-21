@@ -126,8 +126,11 @@ const (
 type RateLimitType string
 
 const (
-	RateLimitTypeFiveHour RateLimitType = "five_hour"
-	RateLimitTypeSevenDay RateLimitType = "seven_day"
+	RateLimitTypeFiveHour     RateLimitType = "five_hour"
+	RateLimitTypeSevenDay     RateLimitType = "seven_day"
+	RateLimitTypeSevenDayOpus RateLimitType = "seven_day_opus"
+	RateLimitTypeSevenDaySonnet RateLimitType = "seven_day_sonnet"
+	RateLimitTypeOverage      RateLimitType = "overage"
 )
 
 // TaskNotificationStatus defines the status of a task notification.
@@ -145,5 +148,7 @@ type McpServerConnectionStatus string
 const (
 	McpServerConnectionStatusConnected McpServerConnectionStatus = "connected"
 	McpServerConnectionStatusFailed    McpServerConnectionStatus = "failed"
+	McpServerConnectionStatusNeedsAuth McpServerConnectionStatus = "needs-auth"
 	McpServerConnectionStatusPending   McpServerConnectionStatus = "pending"
+	McpServerConnectionStatusDisabled  McpServerConnectionStatus = "disabled"
 )

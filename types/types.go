@@ -295,10 +295,14 @@ func (t *ThinkingConfigDisabled) isThinkingConfig() {}
 
 // RateLimitInfo contains rate limit information.
 type RateLimitInfo struct {
-	Status        RateLimitStatus `json:"status"`
-	ResetsAt      *string         `json:"resets_at,omitempty"`
-	RateLimitType *RateLimitType  `json:"rate_limit_type,omitempty"`
-	Utilization   *float64        `json:"utilization,omitempty"`
+	Status                RateLimitStatus `json:"status"`
+	ResetsAt              *string         `json:"resets_at,omitempty"`
+	RateLimitType         *RateLimitType  `json:"rate_limit_type,omitempty"`
+	Utilization           *float64        `json:"utilization,omitempty"`
+	OverageStatus         *RateLimitStatus `json:"overage_status,omitempty"`
+	OverageResetsAt       *int64          `json:"overage_resets_at,omitempty"`
+	OverageDisabledReason *string         `json:"overage_disabled_reason,omitempty"`
+	Raw                   map[string]any  `json:"raw,omitempty"`
 }
 
 // RateLimitEvent represents a rate limit event message.
@@ -321,24 +325,37 @@ type TaskUsage struct {
 // TaskStartedMessage represents a task started system message.
 type TaskStartedMessage struct {
 	SystemMessage
-	TaskID      string `json:"task_id"`
-	Description string `json:"description"`
-	UUID        string `json:"uuid,omitempty"`
+	TaskID      string  `json:"task_id"`
+	Description string  `json:"description"`
+	UUID        string  `json:"uuid,omitempty"`
+	SessionID   string  `json:"session_id,omitempty"`
+	ToolUseID   string  `json:"tool_use_id,omitempty"`
+	TaskType    *string `json:"task_type,omitempty"`
 }
 
 // TaskProgressMessage represents a task progress system message.
 type TaskProgressMessage struct {
 	SystemMessage
-	TaskID string    `json:"task_id"`
-	Usage  TaskUsage `json:"usage"`
+	TaskID       string    `json:"task_id"`
+	Description  string    `json:"description,omitempty"`
+	Usage        TaskUsage `json:"usage"`
+	UUID         string    `json:"uuid,omitempty"`
+	SessionID    string    `json:"session_id,omitempty"`
+	ToolUseID    string    `json:"tool_use_id,omitempty"`
+	LastToolName *string   `json:"last_tool_name,omitempty"`
 }
 
 // TaskNotificationMessage represents a task notification system message.
 type TaskNotificationMessage struct {
 	SystemMessage
-	TaskID    string                 `json:"task_id"`
-	Status    TaskNotificationStatus `json:"status"`
-	ToolUseID string                 `json:"tool_use_id,omitempty"`
+	TaskID     string                 `json:"task_id"`
+	Status     TaskNotificationStatus `json:"status"`
+	OutputFile string                 `json:"output_file,omitempty"`
+	Summary    string                 `json:"summary,omitempty"`
+	UUID       string                 `json:"uuid,omitempty"`
+	SessionID  string                 `json:"session_id,omitempty"`
+	ToolUseID  string                 `json:"tool_use_id,omitempty"`
+	Usage      *TaskUsage             `json:"usage,omitempty"`
 }
 
 // SDKSessionInfo contains information about a session.

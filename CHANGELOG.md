@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SupportedAgents()` function for discovering available agents at runtime
 - GitHub Actions CI/CD pipeline with test, vet, race detection, and linting
 - golangci-lint configuration
+- Rate limit overage fields on `RateLimitInfo`: `OverageStatus`, `OverageResetsAt`, `OverageDisabledReason`, `Raw`
+- `RateLimitType` enum values: `seven_day_opus`, `seven_day_sonnet`, `overage`
+- `McpServerConnectionStatus` enum values: `needs-auth`, `disabled`
+- `McpServerInfo` type and `ServerInfo`/`Scope` fields on `McpServerStatus`
+- `SessionID`, `ToolUseID`, `TaskType` fields on `TaskStartedMessage`
+- `Description`, `UUID`, `SessionID`, `ToolUseID`, `LastToolName` fields on `TaskProgressMessage`
+- `OutputFile`, `Summary`, `UUID`, `SessionID`, `Usage` fields on `TaskNotificationMessage`
+- Rate limit event parser support for both flat and nested (`rate_limit_info`) wire formats with camelCase/snake_case compatibility
 
 ## [0.1.0] - 2025-05-01
 

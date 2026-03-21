@@ -51,6 +51,9 @@ func TestParseTaskStartedMessage(t *testing.T) {
 		"task_id":     "task-123",
 		"description": "Running tests",
 		"uuid":        "uuid-456",
+		"session_id":  "session-789",
+		"tool_use_id": "tool-abc",
+		"task_type":   "background",
 	}
 
 	msg, err := ParseMessage(data)
@@ -75,13 +78,27 @@ func TestParseTaskStartedMessage(t *testing.T) {
 	if tsm.Subtype != "task_started" {
 		t.Errorf("expected subtype task_started, got %s", tsm.Subtype)
 	}
+	if tsm.SessionID != "session-789" {
+		t.Errorf("expected session_id session-789, got %s", tsm.SessionID)
+	}
+	if tsm.ToolUseID != "tool-abc" {
+		t.Errorf("expected tool_use_id tool-abc, got %s", tsm.ToolUseID)
+	}
+	if tsm.TaskType == nil || *tsm.TaskType != "background" {
+		t.Errorf("expected task_type background, got %v", tsm.TaskType)
+	}
 }
 
 func TestParseTaskProgressMessage(t *testing.T) {
 	data := map[string]any{
-		"type":    "system",
-		"subtype": "task_progress",
-		"task_id": "task-123",
+		"type":           "system",
+		"subtype":        "task_progress",
+		"task_id":        "task-123",
+		"description":    "Processing files",
+		"uuid":           "uuid-prog",
+		"session_id":     "session-prog",
+		"tool_use_id":    "tool-prog",
+		"last_tool_name": "Bash",
 		"usage": map[string]any{
 			"input_tokens":                float64(100),
 			"output_tokens":               float64(50),
@@ -103,6 +120,18 @@ func TestParseTaskProgressMessage(t *testing.T) {
 	if tpm.TaskID != "task-123" {
 		t.Errorf("expected task_id task-123, got %s", tpm.TaskID)
 	}
+	if tpm.Description != "Processing files" {
+		t.Errorf("expected description 'Processing files', got %s", tpm.Description)
+	}
+	if tpm.UUID != "uuid-prog" {
+		t.Errorf("expected uuid uuid-prog, got %s", tpm.UUID)
+	}
+	if tpm.SessionID != "session-prog" {
+		t.Errorf("expected session_id session-prog, got %s", tpm.SessionID)
+	}
+	if tpm.LastToolName == nil || *tpm.LastToolName != "Bash" {
+		t.Errorf("expected last_tool_name Bash, got %v", tpm.LastToolName)
+	}
 	if tpm.Usage.InputTokens != 100 {
 		t.Errorf("expected input_tokens 100, got %d", tpm.Usage.InputTokens)
 	}
@@ -117,7 +146,17 @@ func TestParseTaskNotificationMessage(t *testing.T) {
 		"subtype":     "task_notification",
 		"task_id":     "task-123",
 		"status":      "completed",
+		"output_file": "/tmp/output.txt",
+		"summary":     "Task finished successfully",
+		"uuid":        "uuid-notif",
+		"session_id":  "session-notif",
 		"tool_use_id": "tool-456",
+		"usage": map[string]any{
+			"input_tokens":                float64(200),
+			"output_tokens":               float64(100),
+			"cache_creation_input_tokens": float64(20),
+			"cache_read_input_tokens":     float64(10),
+		},
 	}
 
 	msg, err := ParseMessage(data)
@@ -136,8 +175,26 @@ func TestParseTaskNotificationMessage(t *testing.T) {
 	if tnm.Status != types.TaskNotificationStatusCompleted {
 		t.Errorf("expected status completed, got %s", tnm.Status)
 	}
+	if tnm.OutputFile != "/tmp/output.txt" {
+		t.Errorf("expected output_file /tmp/output.txt, got %s", tnm.OutputFile)
+	}
+	if tnm.Summary != "Task finished successfully" {
+		t.Errorf("expected summary 'Task finished successfully', got %s", tnm.Summary)
+	}
+	if tnm.UUID != "uuid-notif" {
+		t.Errorf("expected uuid uuid-notif, got %s", tnm.UUID)
+	}
+	if tnm.SessionID != "session-notif" {
+		t.Errorf("expected session_id session-notif, got %s", tnm.SessionID)
+	}
 	if tnm.ToolUseID != "tool-456" {
 		t.Errorf("expected tool_use_id tool-456, got %s", tnm.ToolUseID)
+	}
+	if tnm.Usage == nil {
+		t.Fatal("expected usage to be set")
+	}
+	if tnm.Usage.InputTokens != 200 {
+		t.Errorf("expected input_tokens 200, got %d", tnm.Usage.InputTokens)
 	}
 }
 
@@ -247,6 +304,92 @@ func TestParseResultMessageWithStopReason(t *testing.T) {
 
 	if rm.StopReason == nil || *rm.StopReason != "end_turn" {
 		t.Errorf("expected stop_reason end_turn, got %v", rm.StopReason)
+	}
+}
+
+func TestParseRateLimitEventWithOverage(t *testing.T) {
+	data := map[string]any{
+		"type":                    "rate_limit_event",
+		"status":                  "rejected",
+		"resets_at":               "2025-06-01T00:00:00Z",
+		"rate_limit_type":         "seven_day_opus",
+		"utilization":             1.0,
+		"overage_status":          "allowed_warning",
+		"overage_resets_at":       float64(1717200000),
+		"overage_disabled_reason": "billing_limit_reached",
+		"uuid":                    "test-uuid-2",
+		"session_id":              "test-session-2",
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rle, ok := msg.(*types.RateLimitEvent)
+	if !ok {
+		t.Fatalf("expected *types.RateLimitEvent, got %T", msg)
+	}
+
+	if rle.Status != types.RateLimitStatusRejected {
+		t.Errorf("expected status rejected, got %s", rle.Status)
+	}
+	if rle.RateLimitType == nil || *rle.RateLimitType != types.RateLimitTypeSevenDayOpus {
+		t.Errorf("expected rate_limit_type seven_day_opus, got %v", rle.RateLimitType)
+	}
+	if rle.OverageStatus == nil || *rle.OverageStatus != types.RateLimitStatusAllowedWarning {
+		t.Errorf("expected overage_status allowed_warning, got %v", rle.OverageStatus)
+	}
+	if rle.OverageResetsAt == nil || *rle.OverageResetsAt != 1717200000 {
+		t.Errorf("expected overage_resets_at 1717200000, got %v", rle.OverageResetsAt)
+	}
+	if rle.OverageDisabledReason == nil || *rle.OverageDisabledReason != "billing_limit_reached" {
+		t.Errorf("expected overage_disabled_reason billing_limit_reached, got %v", rle.OverageDisabledReason)
+	}
+	if rle.Raw == nil {
+		t.Error("expected raw to be set")
+	}
+}
+
+func TestParseRateLimitEventNested(t *testing.T) {
+	// Test the nested rate_limit_info format (as used by Python SDK parser)
+	data := map[string]any{
+		"type":       "rate_limit_event",
+		"uuid":       "nested-uuid",
+		"session_id": "nested-session",
+		"rate_limit_info": map[string]any{
+			"status":        "allowed_warning",
+			"resetsAt":      "2025-06-01T12:00:00Z",
+			"rateLimitType": "overage",
+			"utilization":   0.75,
+			"overageStatus": "allowed",
+		},
+	}
+
+	msg, err := ParseMessage(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rle, ok := msg.(*types.RateLimitEvent)
+	if !ok {
+		t.Fatalf("expected *types.RateLimitEvent, got %T", msg)
+	}
+
+	if rle.UUID != "nested-uuid" {
+		t.Errorf("expected uuid nested-uuid, got %s", rle.UUID)
+	}
+	if rle.Status != types.RateLimitStatusAllowedWarning {
+		t.Errorf("expected status allowed_warning, got %s", rle.Status)
+	}
+	if rle.RateLimitType == nil || *rle.RateLimitType != types.RateLimitTypeOverage {
+		t.Errorf("expected rate_limit_type overage, got %v", rle.RateLimitType)
+	}
+	if rle.ResetsAt == nil || *rle.ResetsAt != "2025-06-01T12:00:00Z" {
+		t.Errorf("expected resets_at from nested camelCase, got %v", rle.ResetsAt)
+	}
+	if rle.OverageStatus == nil || *rle.OverageStatus != types.RateLimitStatusAllowed {
+		t.Errorf("expected overage_status allowed, got %v", rle.OverageStatus)
 	}
 }
 
