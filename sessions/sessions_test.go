@@ -37,7 +37,7 @@ func TestGetSessionMessages(t *testing.T) {
 
 	for _, msg := range messages {
 		data, _ := json.Marshal(msg)
-		file.WriteString(string(data) + "\n")
+		_, _ = file.WriteString(string(data) + "\n")
 	}
 	file.Close()
 
@@ -83,7 +83,7 @@ func TestListSessions(t *testing.T) {
 			"message": map[string]any{"role": "user", "content": "Hello from " + id},
 		}
 		data, _ := json.Marshal(msg)
-		file.WriteString(string(data) + "\n")
+		_, _ = file.WriteString(string(data) + "\n")
 		file.Close()
 	}
 
@@ -112,7 +112,7 @@ func TestRenameSession(t *testing.T) {
 	sessionID := "test-rename"
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 	file, _ := os.Create(filePath)
-	file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
+	_, _ = file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
 	file.Close()
 
 	err = RenameSession(sessionID, "New Title", &tmpDir)
@@ -148,7 +148,7 @@ func TestTagSession(t *testing.T) {
 	sessionID := "test-tag"
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 	file, _ := os.Create(filePath)
-	file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
+	_, _ = file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
 	file.Close()
 
 	tag := "important"
