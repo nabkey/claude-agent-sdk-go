@@ -29,6 +29,10 @@ type AgentOptions struct {
 	// MCPServers configures MCP servers by name.
 	MCPServers map[string]types.MCPServerConfig
 
+	// Channels configures channel servers that can push messages into the session.
+	// This is a research preview feature (--channels).
+	Channels map[string]types.ChannelServerConfig
+
 	// PermissionMode controls how tool permissions are handled.
 	PermissionMode *types.PermissionMode
 
@@ -224,6 +228,15 @@ func (o *AgentOptions) WithMCPServer(name string, config types.MCPServerConfig) 
 	return o
 }
 
+// WithChannel adds a channel server configuration.
+func (o *AgentOptions) WithChannel(name string, config types.ChannelServerConfig) *AgentOptions {
+	if o.Channels == nil {
+		o.Channels = make(map[string]types.ChannelServerConfig)
+	}
+	o.Channels[name] = config
+	return o
+}
+
 // WithAllowedTools sets the allowed tools.
 func (o *AgentOptions) WithAllowedTools(tools ...string) *AgentOptions {
 	o.AllowedTools = tools
@@ -376,6 +389,13 @@ func (o *AgentOptions) Clone() *AgentOptions {
 		clone.MCPServers = make(map[string]types.MCPServerConfig)
 		for k, v := range o.MCPServers {
 			clone.MCPServers[k] = v
+		}
+	}
+
+	if o.Channels != nil {
+		clone.Channels = make(map[string]types.ChannelServerConfig)
+		for k, v := range o.Channels {
+			clone.Channels[k] = v
 		}
 	}
 

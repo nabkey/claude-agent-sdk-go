@@ -51,6 +51,68 @@ type SDKMCPServer struct {
 func (s *SDKMCPServer) isMCPServerConfig() {}
 func (s *SDKMCPServer) ServerType() string { return "sdk" }
 
+// ChannelServerConfig is the interface for channel server configurations.
+// Channel servers can push messages into a Claude Code session.
+// Implementations mirror MCP server types: StdioChannelServer, SSEChannelServer, etc.
+type ChannelServerConfig interface {
+	isChannelServerConfig()
+	// ChannelServerType returns the type identifier for this channel server config.
+	ChannelServerType() string
+}
+
+// ChannelCapability defines capabilities a channel server can declare.
+type ChannelCapability string
+
+const (
+	// ChannelCapabilityPermission allows the channel server to relay tool approval prompts.
+	ChannelCapabilityPermission ChannelCapability = "permission"
+)
+
+// StdioChannelServer represents a channel server that communicates via stdio.
+type StdioChannelServer struct {
+	Type         string              `json:"type,omitempty"` // "stdio"
+	Command      string              `json:"command"`
+	Args         []string            `json:"args,omitempty"`
+	Env          map[string]string   `json:"env,omitempty"`
+	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
+}
+
+func (s *StdioChannelServer) isChannelServerConfig()        {}
+func (s *StdioChannelServer) ChannelServerType() string     { return "stdio" }
+
+// SSEChannelServer represents a channel server that communicates via Server-Sent Events.
+type SSEChannelServer struct {
+	Type         string              `json:"type"` // "sse"
+	URL          string              `json:"url"`
+	Headers      map[string]string   `json:"headers,omitempty"`
+	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
+}
+
+func (s *SSEChannelServer) isChannelServerConfig()        {}
+func (s *SSEChannelServer) ChannelServerType() string     { return "sse" }
+
+// HTTPChannelServer represents a channel server that communicates via HTTP.
+type HTTPChannelServer struct {
+	Type         string              `json:"type"` // "http"
+	URL          string              `json:"url"`
+	Headers      map[string]string   `json:"headers,omitempty"`
+	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
+}
+
+func (s *HTTPChannelServer) isChannelServerConfig()        {}
+func (s *HTTPChannelServer) ChannelServerType() string     { return "http" }
+
+// WebSocketChannelServer represents a channel server that communicates via WebSocket.
+type WebSocketChannelServer struct {
+	Type         string              `json:"type"` // "ws"
+	URL          string              `json:"url"`
+	Headers      map[string]string   `json:"headers,omitempty"`
+	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
+}
+
+func (s *WebSocketChannelServer) isChannelServerConfig()        {}
+func (s *WebSocketChannelServer) ChannelServerType() string     { return "ws" }
+
 // SandboxNetworkConfig defines network configuration for sandbox.
 type SandboxNetworkConfig struct {
 	AllowUnixSockets    []string `json:"allowUnixSockets,omitempty"`

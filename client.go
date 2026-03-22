@@ -127,6 +127,7 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 		Sandbox:                  opts.Sandbox,
 		AddDirs:                  opts.AddDirs,
 		MCPServers:               opts.MCPServers,
+		Channels:                 opts.Channels,
 		IncludePartialMessages:   opts.IncludePartialMessages,
 		ForkSession:              opts.ForkSession,
 		Agents:                   opts.Agents,

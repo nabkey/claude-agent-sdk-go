@@ -80,6 +80,8 @@ type SubprocessOptions struct {
 	AddDirs []string
 	// MCPServers configures MCP servers.
 	MCPServers map[string]types.MCPServerConfig
+	// Channels configures channel servers.
+	Channels map[string]types.ChannelServerConfig
 	// IncludePartialMessages enables partial message streaming.
 	IncludePartialMessages bool
 	// ForkSession forks instead of continuing sessions.
@@ -315,6 +317,16 @@ func (t *SubprocessTransport) buildCommand() []string {
 			mcpJSON, _ := json.Marshal(mcpConfig)
 			cmd = append(cmd, "--mcp-config", string(mcpJSON))
 		}
+	}
+
+	// Channel servers
+	if len(opts.Channels) > 0 {
+		channelsForCLI := make(map[string]any)
+		for name, config := range opts.Channels {
+			channelsForCLI[name] = config
+		}
+		channelsJSON, _ := json.Marshal(channelsForCLI)
+		cmd = append(cmd, "--channels", string(channelsJSON))
 	}
 
 	if opts.IncludePartialMessages {

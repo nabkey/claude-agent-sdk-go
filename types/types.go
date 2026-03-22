@@ -358,6 +358,17 @@ type TaskNotificationMessage struct {
 	Usage      *TaskUsage             `json:"usage,omitempty"`
 }
 
+// ChannelMessage represents a message pushed by a channel server into the session.
+type ChannelMessage struct {
+	ServerName string         `json:"server_name"`
+	Content    string         `json:"content"`
+	Data       map[string]any `json:"data,omitempty"`
+	UUID       string         `json:"uuid,omitempty"`
+	SessionID  string         `json:"session_id,omitempty"`
+}
+
+func (m *ChannelMessage) isMessage() {}
+
 // SDKSessionInfo contains information about a session.
 type SDKSessionInfo struct {
 	SessionID   string     `json:"session_id"`

@@ -27,6 +27,8 @@ func ParseMessage(data map[string]any) (types.Message, error) {
 		return parseStreamEvent(data)
 	case "rate_limit_event":
 		return parseRateLimitEvent(data)
+	case "channel_message":
+		return parseChannelMessage(data)
 	default:
 		// Forward-compatible: silently skip unknown message types
 		return nil, nil
@@ -256,6 +258,21 @@ func parseStreamEvent(data map[string]any) (*types.StreamEvent, error) {
 
 	if parentID, ok := data["parent_tool_use_id"].(string); ok {
 		msg.ParentToolUseID = &parentID
+	}
+
+	return msg, nil
+}
+
+func parseChannelMessage(data map[string]any) (*types.ChannelMessage, error) {
+	msg := &types.ChannelMessage{}
+
+	msg.ServerName, _ = data["server_name"].(string)
+	msg.Content, _ = data["content"].(string)
+	msg.UUID, _ = data["uuid"].(string)
+	msg.SessionID, _ = data["session_id"].(string)
+
+	if d, ok := data["data"].(map[string]any); ok {
+		msg.Data = d
 	}
 
 	return msg, nil

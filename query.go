@@ -91,6 +91,7 @@ func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any
 			Sandbox:                options.Sandbox,
 			AddDirs:                options.AddDirs,
 			MCPServers:             options.MCPServers,
+			Channels:               options.Channels,
 			IncludePartialMessages: options.IncludePartialMessages,
 			ForkSession:            options.ForkSession,
 			Agents:                 options.Agents,
