@@ -211,7 +211,7 @@ func createPersistentClient(ctx context.Context, brainURL string) (*claude.Clien
 		MCPServers: map[string]types.MCPServerConfig{
 			"talon": talonServer,
 		},
-		AllowedTools:       brainToolNames(),
+		Tools:              brainToolNames(),
 		PermissionMode:     &bypassPerms,
 		MaxTurns:           claude.Int(25),
 		AppendSystemPrompt: &systemPrompt,
