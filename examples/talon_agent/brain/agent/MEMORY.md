@@ -1,0 +1,3 @@
+# LONG TERM
+
+# SHORT TERM
