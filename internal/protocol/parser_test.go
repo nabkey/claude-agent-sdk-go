@@ -10,7 +10,7 @@ func TestParseRateLimitEvent(t *testing.T) {
 	data := map[string]any{
 		"type":            "rate_limit_event",
 		"status":          "allowed_warning",
-		"resets_at":       "2025-01-01T00:00:00Z",
+		"resets_at":       float64(1735689600),
 		"rate_limit_type": "five_hour",
 		"utilization":     0.85,
 		"uuid":            "test-uuid",
@@ -33,7 +33,7 @@ func TestParseRateLimitEvent(t *testing.T) {
 	if rle.UUID != "test-uuid" {
 		t.Errorf("expected uuid test-uuid, got %s", rle.UUID)
 	}
-	if rle.ResetsAt == nil || *rle.ResetsAt != "2025-01-01T00:00:00Z" {
+	if rle.ResetsAt == nil || *rle.ResetsAt != 1735689600 {
 		t.Errorf("unexpected resets_at: %v", rle.ResetsAt)
 	}
 	if rle.RateLimitType == nil || *rle.RateLimitType != types.RateLimitTypeFiveHour {
@@ -318,7 +318,7 @@ func TestParseRateLimitEventWithOverage(t *testing.T) {
 	data := map[string]any{
 		"type":                    "rate_limit_event",
 		"status":                  "rejected",
-		"resets_at":               "2025-06-01T00:00:00Z",
+		"resets_at":               float64(1748736000),
 		"rate_limit_type":         "seven_day_opus",
 		"utilization":             1.0,
 		"overage_status":          "allowed_warning",
@@ -366,7 +366,7 @@ func TestParseRateLimitEventNested(t *testing.T) {
 		"session_id": "nested-session",
 		"rate_limit_info": map[string]any{
 			"status":        "allowed_warning",
-			"resetsAt":      "2025-06-01T12:00:00Z",
+			"resetsAt":      float64(1748779200),
 			"rateLimitType": "overage",
 			"utilization":   0.75,
 			"overageStatus": "allowed",
@@ -392,7 +392,7 @@ func TestParseRateLimitEventNested(t *testing.T) {
 	if rle.RateLimitType == nil || *rle.RateLimitType != types.RateLimitTypeOverage {
 		t.Errorf("expected rate_limit_type overage, got %v", rle.RateLimitType)
 	}
-	if rle.ResetsAt == nil || *rle.ResetsAt != "2025-06-01T12:00:00Z" {
+	if rle.ResetsAt == nil || *rle.ResetsAt != 1748779200 {
 		t.Errorf("expected resets_at from nested camelCase, got %v", rle.ResetsAt)
 	}
 	if rle.OverageStatus == nil || *rle.OverageStatus != types.RateLimitStatusAllowed {

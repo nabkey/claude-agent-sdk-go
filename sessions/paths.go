@@ -134,3 +134,12 @@ func findProjectDir(projectPath string) string {
 	}
 	return ""
 }
+
+// ProjectKeyForDirectory returns the sanitized project key for a directory,
+// matching the CLI's project-directory naming.
+//
+// This is the default SessionStore project key, so a mirrored session lines up
+// with the on-disk layout.
+func ProjectKeyForDirectory(directory string) string {
+	return sanitizePath(canonicalizePath(directory))
+}

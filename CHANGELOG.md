@@ -7,6 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — streaming transport, control surface, and session store
+
+This completes the six-phase plan in [GAP_ANALYSIS.md](GAP_ANALYSIS.md),
+bringing the SDK to parity with the Python (0.2.128) and TypeScript (0.3.220)
+Agent SDKs.
+
+**Transport and lifecycle**
+
+- `Query()` now runs the CLI in streaming mode, as both reference SDKs do. It
+  previously used `--print`, which cannot carry the control protocol, so
+  `Hooks`, `CanUseTool`, and in-process SDK MCP servers were accepted and then
+  silently ignored. They now work in `Query()` as well as `Client`.
+- `Transport` is now a public interface, and `QueryWithTransport` /
+  `NewClientWithTransport` accept an implementation. This allows running the
+  CLI in a container, VM, or remote worker, and makes the SDK testable without
+  a `claude` binary.
+- Stdout framing was rewritten. Lines are framed on `\n` and parsed
+  independently; a stray non-JSON line (some CLI builds write `[SandboxDebug]`
+  to stdout) previously poisoned every subsequent message.
+- Subprocess teardown is now staged — stdin close, then SIGTERM, then SIGKILL,
+  with a grace period at each step. Killing outright interrupted the CLI's
+  session-file flush and lost the last assistant message.
+- Live subprocesses are terminated on SIGINT/SIGTERM/SIGHUP, so a parent that
+  exits without `Close()` no longer leaks orphaned `claude` processes.
+- Transport errors now reach the caller. `Query()` emits them on its channel
+  and `Client.Err()` reports them; previously the stream just closed silently.
+  A `ProcessError` following an error result is replaced with the structured
+  error the CLI reported, instead of a bare "exit code 1".
+- `control_cancel_request` is implemented: a cancelled handler is abandoned and
+  no stale response is written.
+- Stdin stays open past a `result` frame while delegated agent work is still in
+  flight, since background subagents still need the control channel for hook
+  and SDK-MCP responses.
+- `Client.ReceiveMessages` and `ReceiveResponse` no longer race; the stream has
+  a single consumer and misuse is now visible.
+- Environment: `CLAUDE_AGENT_SDK_VERSION` is set, and `CLAUDECODE` is filtered
+  from the inherited environment so the subprocess does not believe it is
+  nested inside Claude Code.
+
+**Initialize handshake**
+
+Agents, system prompts, and much of the session configuration now travel on the
+`initialize` control request rather than as CLI flags, matching both reference
+SDKs. New fields: `agents`, `systemPrompt`, `appendSystemPrompt`,
+`excludeDynamicSections`, `title`, `skills`, `toolAliases`,
+`planModeInstructions`, `jsonSchema`, `promptSuggestions`,
+`forwardSubagentText`, `supportedDialogKinds`, `sdkMcpServers`.
+
+**Options**
+
+`Agent`, `Skills`, `TaskBudget`, `SessionID`, `ResumeSessionAt`,
+`StrictMCPConfig`, `IncludeHookEvents`, `AllowDangerouslySkipPermissions`,
+`ManagedSettings`, `Title`, `ToolAliases`, `PlanModeInstructions`,
+`PromptSuggestions`, `ForwardSubagentText`, `SupportedDialogKinds`,
+`OnElicitation`, `OnUserDialog`, `Debug`, `DebugFile`, `SessionStore`,
+`SessionStoreFlush`, `LoadTimeoutMS`, `Warn`. `SystemPrompt` additionally
+accepts `[]string` (with `types.SystemPromptDynamicBoundary`) and
+`*types.SystemPromptFile`.
+
+**Control methods on `Client`**
+
+`GetContextUsage`, `GetSessionUsage`, `SetMaxThinkingTokens`,
+`ApplyFlagSettings`, `SetMCPServers`, `SetMCPPermissionModeOverride`,
+`ReloadPlugins`, `ReloadSkills`, `ReadFile`, `SeedReadState`,
+`BackgroundTasks`, `InitializationResult`, `Reinitialize`,
+`SupportedCommands`, `SupportedModels`, `SupportedAgents`, `AccountInfo`,
+`SendMessage`, `StreamInput`, `PreviewRewindFiles`, `Err`.
+
+`RewindFiles` now returns `*types.RewindFilesResult` rather than only an error,
+and `InterruptWithOptions` returns the interrupt receipt.
+
+**Types**
+
+- `ServerToolUseBlock` and `ServerToolResultBlock` — server-side tool calls
+  (web search, advisor) were previously dropped from message content.
+- `ResultMessage` gains `ModelUsage`, `PermissionDenials`, `DeferredToolUse`,
+  `Errors`, `APIErrorStatus`, `UUID`, and `TerminalReason`.
+- `AssistantMessage` gains `MessageID`, `StopReason`, `SessionID`, `UUID`, and
+  now actually parses `Error`.
+- New messages: `TaskUpdatedMessage`, `HookEventMessage`, `MirrorErrorMessage`,
+  `CompactBoundaryMessage`, `SessionStateChangedMessage`,
+  `PermissionDeniedMessage`, `APIRetryMessage`, `StatusMessage`,
+  `ToolProgressMessage`, `BackgroundTasksChangedMessage`,
+  `PromptSuggestionMessage`.
+- All 31 hook events (was 10), plus `agent_id`, `agent_type`, `prompt_id` and
+  `effort` on `BaseHookInput`.
+- `ToolPermissionContext` gains `ToolUseID`, `AgentID`, `BlockedPath`,
+  `DecisionReason`, `Title`, `DisplayName`, `Description`.
+- `AgentDefinition` gains `DisallowedTools`, `InitialPrompt`, `MaxTurns`,
+  `Background`, `Effort`, `PermissionMode`, `Observer`, `ObserverMessage`.
+- Enum values: `PermissionMode` `dontAsk`/`auto`, `EffortLevel` `xhigh`,
+  `PermissionUpdateDestination` `cliArg`, four more `AssistantMessageError`
+  values, and `RateLimitType` `seven_day_overage_included`.
+- Typed control responses: `InitializeResult`, `ContextUsage`,
+  `RewindFilesResult`, `InterruptResult`, `SlashCommand`, `ModelInfo`,
+  `AgentInfo`, `AccountInfo`, `MCPSetServersResult`, `SessionUsage`.
+
+**Session store**
+
+New `SessionStore` interface mirroring transcripts to external storage, with
+`SessionLister`, `SessionSummarizer`, `SessionDeleter` and
+`SessionSubkeyLister` as optional capabilities. Includes
+`InMemorySessionStore`, `FoldSessionSummary`, `ProjectKeyForDirectory`,
+transcript-mirror batching with retry, and the `*FromStore` /
+`DeleteSessionViaStore` / `ImportSessionToStore` functions.
+
+**Sessions**
+
+- `GetSessionMessages` now reconstructs the conversation chain by walking
+  `parentUuid` links, filtering sidechain and internal entries, instead of
+  returning every raw JSONL line.
+- New: `ListSubagents`, `GetSubagentMessages`, `DeleteSession`, and a
+  `ForkSession` that rewrites the transcript offline.
+- `SDKSessionInfo` gains `Summary`, `LastModified`, `FileSize`, `CustomTitle`.
+
+**MCP**
+
+- `mcp.NewToolFor` generates a tool's JSON Schema from a Go struct and decodes
+  the handler's argument, replacing hand-written schemas and `map[string]any`
+  unpacking.
+- Typed `mcp.ToolAnnotations`, `MaxResultSizeChars` via `_meta`, and
+  `ResourceLinkResult` / `EmbeddedResourceResult` / `AudioResult`.
+
+**Diagnostics**
+
+- A warning is emitted when `CanUseTool` is set alongside options that shadow
+  it (`bypassPermissions`, or an `AllowedTools` entry allowing a whole tool) —
+  the most common reason a permission callback appears never to fire. Route it
+  with `AgentOptions.Warn`.
+
 ### Fixed — wire-protocol correctness
 
 Options in this section previously produced CLI arguments or control-protocol
@@ -69,6 +199,23 @@ Verified against the Python (0.2.128) and TypeScript (0.3.220) Agent SDKs; see
 
 ### Breaking
 
+- `ForkSession` moved from the root package to `sessions.ForkSession` and
+  returns `*sessions.ForkSessionResult`. It now rewrites the transcript offline
+  instead of spawning a billed CLI query.
+- `SupportedAgents` moved from a package-level function that screen-scraped
+  `claude agents` output to `Client.SupportedAgents()`, which reads the
+  structured initialize response.
+- `Client.RewindFiles` returns `(*types.RewindFilesResult, error)`.
+- `types.SessionMessage` gains `UUID`, `SessionID`, `Message` and
+  `ParentToolUseID`; `Data` now holds the raw transcript line.
+- `types.SDKSessionInfo` gains `Summary`, `LastModified`, `FileSize` and
+  `CustomTitle`.
+- `types.RateLimitInfo.ResetsAt` changes from `*string` to `*int64`, matching
+  the wire format's Unix timestamp.
+- `types.AgentDefinition.Memory` changes from `*string` to
+  `*types.AgentMemoryScope`.
+- `mcp.Tool.Annotations` changes from `map[string]any` to
+  `*mcp.ToolAnnotations`.
 - `types.ToolConfiguration` (fields `Enabled`, `MaxConcurrency`, `Timeout`) is
   replaced by `types.ToolConfig`. Those fields did not exist in the protocol.
   `AgentOptions.ToolConfig` changes from `map[string]types.ToolConfiguration`

@@ -87,57 +87,31 @@ func GetSessionInfo(sessionID string, directory *string) (*types.SDKSessionInfo,
 	return parseSessionFile(filePath, sessionID, absDir)
 }
 
-// GetSessionMessages reads all messages from a session transcript.
-// If directory is nil, uses the current working directory.
+// GetSessionMessages reads a session's conversation.
+//
+// A transcript is a tree, not a list: retried and edited turns leave orphaned
+// branches behind. This returns the branch the conversation actually took,
+// with sidechain and internal entries filtered out. Use the Data field on each
+// message to reach the raw transcript line.
+//
+// If directory is nil the current working directory is used.
 func GetSessionMessages(sessionID string, directory *string) ([]types.SessionMessage, error) {
 	dir := "."
 	if directory != nil {
 		dir = *directory
 	}
 
-	absDir := canonicalizePath(dir)
-
-	projectDir := findProjectDir(absDir)
+	projectDir := findProjectDir(canonicalizePath(dir))
 	if projectDir == "" {
 		return nil, fmt.Errorf("session %s not found", sessionID)
 	}
-	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 
-	file, err := os.Open(filePath)
+	entries, err := readTranscript(filepath.Join(projectDir, sessionID+".jsonl"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer file.Close()
-
-	var messages []types.SessionMessage
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		var msg types.SessionMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue // Skip unparseable lines
-		}
-
-		// Also store the full data
-		var data map[string]any
-		if err := json.Unmarshal([]byte(line), &data); err == nil {
-			msg.Data = data
-		}
-
-		messages = append(messages, msg)
+		return nil, err
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	return messages, nil
+	return entriesToMessages(buildConversationChain(entries)), nil
 }
 
 // parseSessionFile reads a JSONL session file and extracts session info.

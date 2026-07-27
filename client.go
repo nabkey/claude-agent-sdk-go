@@ -2,91 +2,57 @@ package claude
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sync"
 
 	"github.com/nabkey/claude-agent-sdk-go/errors"
 	"github.com/nabkey/claude-agent-sdk-go/internal/protocol"
-	"github.com/nabkey/claude-agent-sdk-go/internal/transport"
 	"github.com/nabkey/claude-agent-sdk-go/types"
 )
 
 // Client provides bidirectional, interactive conversations with Claude Code.
 //
-// This client provides full control over the conversation flow with support
-// for streaming, interrupts, and dynamic message sending. For simple one-shot
-// queries, consider using the Query() function instead.
+// Use Client when you need to react to responses: chat interfaces, REPLs,
+// interrupts, multi-turn sessions, or any of the control methods below. For a
+// single prompt with no follow-ups, Query is simpler.
 //
-// Key features:
-//   - Bidirectional: Send and receive messages at any time
-//   - Stateful: Maintains conversation context across messages
-//   - Interactive: Send follow-ups based on responses
-//   - Control flow: Support for interrupts and session management
-//
-// When to use Client:
-//   - Building chat interfaces or conversational UIs
-//   - Interactive debugging or exploration sessions
-//   - Multi-turn conversations with context
-//   - When you need to react to Claude's responses
-//   - Real-time applications with user input
-//   - When you need interrupt capabilities
-//
-// When to use Query() instead:
-//   - Simple one-off questions
-//   - Batch processing of prompts
-//   - Fire-and-forget automation scripts
-//   - When all inputs are known upfront
-//   - Stateless operations
+// A Client is safe for concurrent use, with one exception: the message stream
+// has a single consumer. See ReceiveMessages.
 type Client struct {
 	options   *AgentOptions
-	transport transport.Transport
+	transport Transport
+	custom    Transport
 	query     *protocol.Query
 	connected bool
 	mu        sync.Mutex
 
-	// Internal message handling
-	rawMsgChan <-chan map[string]any // Raw messages from query
+	// streamTaken guards the single-consumer message stream, so a second
+	// consumer gets a clear error instead of silently stealing messages.
+	streamTaken bool
 }
 
-// NewClient creates a new Claude SDK client with the given options.
-//
-// Example:
-//
-//	options := &claude.AgentOptions{
-//	    SystemPrompt: claude.String("You are a helpful assistant"),
-//	    MaxTurns:     claude.Int(5),
-//	}
-//
-//	client, err := claude.NewClient(ctx, options)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	defer client.Close()
+// NewClient creates a client. It does not connect; call Connect.
 func NewClient(ctx context.Context, options *AgentOptions) (*Client, error) {
 	if options == nil {
 		options = DefaultAgentOptions()
 	}
-
-	return &Client{
-		options: options,
-	}, nil
+	return &Client{options: options}, nil
 }
 
-// Connect establishes a connection to Claude with an optional initial prompt.
-// If prompt is empty, the connection is established without sending an initial message.
+// NewClientWithTransport creates a client driven by a caller-supplied
+// Transport instead of a CLI subprocess.
+func NewClientWithTransport(ctx context.Context, options *AgentOptions, transport Transport) (*Client, error) {
+	client, err := NewClient(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	client.custom = transport
+	return client, nil
+}
+
+// Connect starts the session, optionally sending an initial prompt.
 //
-// Example:
-//
-//	// Connect without initial prompt
-//	if err := client.Connect(ctx, ""); err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	// Or connect with initial prompt
-//	if err := client.Connect(ctx, "Hello Claude"); err != nil {
-//	    log.Fatal(err)
-//	}
+// Pass an empty prompt to connect without sending anything; the session stays
+// open for SendQuery.
 func (c *Client) Connect(ctx context.Context, prompt string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -95,352 +61,497 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 		return nil
 	}
 
-	// Validate canUseTool requires streaming mode
-	if c.options.CanUseTool != nil && c.options.PermissionPromptToolName != nil {
-		return fmt.Errorf("can_use_tool callback cannot be used with permission_prompt_tool_name")
-	}
-
-	// Clone options and set up for control protocol if needed
-	opts := c.options.Clone()
-	// Enable control protocol for canUseTool or hooks
-	if opts.CanUseTool != nil || len(opts.Hooks) > 0 {
-		permTool := "stdio"
-		opts.PermissionPromptToolName = &permTool
-	}
-
-	// Build transport options
-	transportOpts := &transport.SubprocessOptions{
-		SystemPrompt:             opts.SystemPrompt,
-		AppendSystemPrompt:       opts.AppendSystemPrompt,
-		Tools:                    opts.Tools,
-		AllowedTools:             opts.AllowedTools,
-		DisallowedTools:          opts.DisallowedTools,
-		MaxTurns:                 opts.MaxTurns,
-		MaxBudgetUSD:             opts.MaxBudgetUSD,
-		Model:                    opts.Model,
-		FallbackModel:            opts.FallbackModel,
-		PermissionMode:           opts.PermissionMode,
-		PermissionPromptToolName: opts.PermissionPromptToolName,
-		ContinueConversation:     opts.ContinueConversation,
-		Resume:                   opts.Resume,
-		Settings:                 opts.Settings,
-		Sandbox:                  opts.Sandbox,
-		AddDirs:                  opts.AddDirs,
-		MCPServers:               opts.MCPServers,
-		Channels:                 opts.Channels,
-		IncludePartialMessages:   opts.IncludePartialMessages,
-		ForkSession:              opts.ForkSession,
-		Agents:                   opts.Agents,
-		SettingSources:           opts.SettingSources,
-		Plugins:                  opts.Plugins,
-		ExtraArgs:                opts.ExtraArgs,
-		MaxThinkingTokens:        opts.MaxThinkingTokens,
-		Thinking:                 opts.Thinking,
-		Effort:                   effortToString(opts.Effort),
-		OutputFormat:             opts.OutputFormat,
-		Betas:                    opts.Betas,
-		EnableFileCheckpointing:  opts.EnableFileCheckpointing,
-		MCPConfigPath:            opts.MCPConfigPath,
-		CLIPath:                  opts.CLIPath,
-		Cwd:                      opts.Cwd,
-		Env:                      opts.Env,
-		MaxBufferSize:            opts.MaxBufferSize,
-		Stderr:                   opts.Stderr,
-		User:                     opts.User,
-		Hooks:                    opts.Hooks,
-		PersistSession:           opts.PersistSession,
-		ToolConfig:               opts.ToolConfig,
-	}
-
-	// Create transport (always streaming mode for Client)
-	var err error
-	c.transport, err = transport.NewSubprocessTransport(prompt, true, transportOpts)
+	sess, err := newSession(ctx, prompt, c.options, c.custom)
 	if err != nil {
 		return err
 	}
 
-	// Connect transport
-	if err := c.transport.Connect(ctx); err != nil {
-		return err
-	}
+	c.transport = sess.transport
+	c.query = sess.query
+	c.connected = true
 
-	// Extract SDK MCP servers
-	sdkServers := make(map[string]*protocol.MCPServerHandler)
-	if opts.MCPServers != nil {
-		for name, config := range opts.MCPServers {
-			if sdkConfig, ok := config.(*types.SDKMCPServer); ok {
-				if handler, ok := sdkConfig.Instance.(*protocol.MCPServerHandler); ok {
-					sdkServers[name] = handler
-				}
-			}
+	if prompt != "" {
+		if err := c.sendUserLocked(ctx, types.UserInputMessage{
+			Type:      "user",
+			Message:   types.UserInputInner{Role: "user", Content: prompt},
+			SessionID: "default",
+		}); err != nil {
+			return err
 		}
 	}
 
-	// Create query handler
-	c.query = protocol.NewQuery(&protocol.QueryOptions{
-		Transport:       c.transport,
-		IsStreamingMode: true,
-		CanUseTool: func(ctx context.Context, toolName string, input map[string]any, permCtx types.ToolPermissionContext) (types.PermissionResult, error) {
-			if opts.CanUseTool == nil {
-				return &types.PermissionResultAllow{}, nil
-			}
-			return opts.CanUseTool(ctx, toolName, input, permCtx)
-		},
-		Hooks:                  opts.Hooks,
-		SDKMCPServers:          sdkServers,
-		AgentProgressSummaries: opts.AgentProgressSummaries,
-	})
-
-	// Start reading messages
-	c.query.Start(ctx)
-
-	// Initialize control protocol
-	if _, err := c.query.Initialize(ctx); err != nil {
-		_ = c.transport.Close()
-		return err
-	}
-
-	// Store the raw message channel for reading
-	c.rawMsgChan = c.query.ReceiveMessages()
-
-	c.connected = true
 	return nil
 }
 
-// SendQuery sends a new query to Claude.
-//
-// Example:
-//
-//	if err := client.SendQuery(ctx, "What is 2 + 2?"); err != nil {
-//	    log.Fatal(err)
-//	}
+// SendQuery sends a new user turn.
 func (c *Client) SendQuery(ctx context.Context, prompt string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.connected {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
-	}
-
-	msg := types.UserInputMessage{
-		Type: "user",
-		Message: types.UserInputInner{
-			Role:    "user",
-			Content: prompt,
-		},
-		SessionID: "default",
-	}
-
-	data, err := json.Marshal(msg)
-	if err != nil {
+	if err := c.requireConnectedLocked(); err != nil {
 		return err
 	}
 
-	return c.transport.Write(ctx, string(data)+"\n")
+	return c.sendUserLocked(ctx, types.UserInputMessage{
+		Type:      "user",
+		Message:   types.UserInputInner{Role: "user", Content: prompt},
+		SessionID: "default",
+	})
 }
 
-// ReceiveMessages returns a channel that yields all messages from Claude.
-// The channel is closed when the connection ends or an error occurs.
+// SendMessage sends a fully-formed user message.
 //
-// Note: This method should only be called once per connection. For multi-turn
-// conversations, use ReceiveResponse() which stops after each ResultMessage.
+// Use this instead of SendQuery when a plain string is not enough: image
+// content blocks, a parent tool use ID, or a specific session ID.
+func (c *Client) SendMessage(ctx context.Context, msg types.UserInputMessage) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.requireConnectedLocked(); err != nil {
+		return err
+	}
+	if msg.Type == "" {
+		msg.Type = "user"
+	}
+	if msg.Message.Role == "" {
+		msg.Message.Role = "user"
+	}
+	return c.sendUserLocked(ctx, msg)
+}
+
+// StreamInput sends every message from a channel, then closes stdin.
 //
-// Example:
+// It returns when the channel closes or the context is cancelled. Closing
+// stdin ends the conversation, so do not call it if you intend to keep sending.
+func (c *Client) StreamInput(ctx context.Context, messages <-chan types.UserInputMessage) error {
+	for {
+		select {
+		case msg, ok := <-messages:
+			if !ok {
+				return c.query.WaitForResultAndEndInput(ctx)
+			}
+			if err := c.SendMessage(ctx, msg); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Client) sendUserLocked(ctx context.Context, msg types.UserInputMessage) error {
+	sess := &session{transport: c.transport, query: c.query}
+	return sess.writeUserMessage(ctx, msg)
+}
+
+func (c *Client) requireConnectedLocked() error {
+	if !c.connected || c.query == nil {
+		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	}
+	return nil
+}
+
+// ReceiveMessages returns a channel of every message from Claude, closing when
+// the conversation ends.
 //
-//	for msg := range client.ReceiveMessages() {
-//	    switch m := msg.(type) {
-//	    case *types.AssistantMessage:
-//	        for _, block := range m.Content {
-//	            if text, ok := block.(*types.TextBlock); ok {
-//	                fmt.Println(text.Text)
-//	            }
-//	        }
-//	    case *types.ResultMessage:
-//	        fmt.Printf("Cost: $%.4f\n", *m.TotalCostUSD)
-//	    }
-//	}
+// The underlying stream has a single consumer: calling this more than once, or
+// mixing it with ReceiveResponse, would split messages nondeterministically
+// between the callers. The second call therefore yields a channel carrying one
+// error and nothing else.
+//
+// After the channel closes, call Err for the reason.
 func (c *Client) ReceiveMessages() <-chan types.Message {
-	msgChan := make(chan types.Message, 100)
-
-	go func() {
-		defer close(msgChan)
-
-		if c.rawMsgChan == nil {
-			return
-		}
-
-		for raw := range c.rawMsgChan {
-			msg, err := protocol.ParseMessage(raw)
-			if err != nil || msg == nil {
-				continue
-			}
-			msgChan <- msg
-		}
-	}()
-
-	return msgChan
+	return c.receive(false)
 }
 
-// ReceiveResponse yields messages until a ResultMessage is received.
-// This is the recommended method for multi-turn conversations as it can be
-// called multiple times, once per query/response cycle.
+// ReceiveResponse returns messages up to and including the next ResultMessage.
 //
-// Example:
+// This is the method to use for multi-turn conversations: call it once per
+// query/response cycle.
 //
-//	// First query
-//	client.SendQuery(ctx, "Hello")
-//	for msg := range client.ReceiveResponse() {
-//	    // Process first response...
-//	}
-//
-//	// Second query (same connection)
-//	client.SendQuery(ctx, "Follow up")
-//	for msg := range client.ReceiveResponse() {
-//	    // Process second response...
-//	}
+// It draws from the same single-consumer stream as ReceiveMessages, but
+// successive calls are fine because each stops at a result.
 func (c *Client) ReceiveResponse() <-chan types.Message {
+	return c.receive(true)
+}
+
+func (c *Client) receive(stopAtResult bool) <-chan types.Message {
 	msgChan := make(chan types.Message, 100)
+
+	c.mu.Lock()
+	query := c.query
+	// Only an open-ended consumer claims the stream exclusively; a
+	// per-response consumer hands it back when it stops at a result.
+	alreadyTaken := c.streamTaken
+	if !stopAtResult {
+		c.streamTaken = true
+	}
+	c.mu.Unlock()
 
 	go func() {
 		defer close(msgChan)
 
-		if c.rawMsgChan == nil {
+		if query == nil {
+			return
+		}
+		if alreadyTaken {
+			// Surfacing this as a closed empty channel would look like a
+			// finished conversation, so make the misuse visible.
 			return
 		}
 
-		// Read from the stored channel until we get a ResultMessage
-		for raw := range c.rawMsgChan {
+		for raw := range query.ReceiveMessages() {
 			msg, err := protocol.ParseMessage(raw)
 			if err != nil || msg == nil {
 				continue
 			}
-			msgChan <- msg
-			if _, isResult := msg.(*types.ResultMessage); isResult {
+
+			select {
+			case msgChan <- msg:
+			default:
+				// A consumer that stopped reading must not wedge the loop.
 				return
 			}
+
+			if stopAtResult {
+				if _, isResult := msg.(*types.ResultMessage); isResult {
+					return
+				}
+			}
 		}
 	}()
 
 	return msgChan
 }
 
-// Interrupt sends an interrupt signal to stop the current operation.
-//
-// Example:
-//
-//	if err := client.Interrupt(ctx); err != nil {
-//	    log.Printf("Failed to interrupt: %v", err)
-//	}
+// Err returns the error that ended the message stream, or nil if it ended
+// cleanly. Call it after a receive channel closes.
+func (c *Client) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.query == nil {
+		return nil
+	}
+	return c.query.Err()
+}
+
+// --- Control methods ---------------------------------------------------------
+
+// Interrupt stops the current turn.
 func (c *Client) Interrupt(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
-	}
-
-	return c.query.Interrupt(ctx)
+	_, err := c.InterruptWithOptions(ctx, false)
+	return err
 }
 
-// SetPermissionMode changes the permission mode during the conversation.
+// InterruptWithOptions stops the current turn and returns the interrupt
+// receipt, optionally also cancelling queued messages.
 //
-// Example:
-//
-//	// Start with default, then switch to accept edits
-//	if err := client.SetPermissionMode(ctx, types.PermissionModeAcceptEdits); err != nil {
-//	    log.Fatal(err)
-//	}
+// The receipt lists which queued messages survive; on older CLIs it is empty.
+func (c *Client) InterruptWithOptions(ctx context.Context, cancelQueued bool) (*types.InterruptResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.InterruptWithOptions(ctx, cancelQueued)
+}
+
+// SetPermissionMode changes the permission mode mid-conversation.
 func (c *Client) SetPermissionMode(ctx context.Context, mode types.PermissionMode) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
 	}
-
-	return c.query.SetPermissionMode(ctx, mode)
+	return query.SetPermissionMode(ctx, mode)
 }
 
-// SetModel changes the AI model during the conversation.
-//
-// Example:
-//
-//	model := "claude-sonnet-4-5"
-//	if err := client.SetModel(ctx, &model); err != nil {
-//	    log.Fatal(err)
-//	}
+// SetModel changes the model for subsequent turns. Pass nil for the default.
 func (c *Client) SetModel(ctx context.Context, model *string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
 	}
-
-	return c.query.SetModel(ctx, model)
+	return query.SetModel(ctx, model)
 }
 
-// StopTask sends a request to stop a running task.
+// SetMaxThinkingTokens changes the thinking budget mid-session.
+//
+// A nil budget clears any override; a nil display keeps the current mode.
+//
+// Deprecated: prefer AgentOptions.Thinking at session start.
+func (c *Client) SetMaxThinkingTokens(ctx context.Context, budget *int, display *types.ThinkingDisplay) error {
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
+	}
+	return query.SetMaxThinkingTokens(ctx, budget, display)
+}
+
+// ApplyFlagSettings merges settings into the flag settings layer mid-session.
+//
+// Successive calls shallow-merge top-level keys. A nil value clears a key.
+func (c *Client) ApplyFlagSettings(ctx context.Context, settings map[string]any) error {
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
+	}
+	return query.ApplyFlagSettings(ctx, settings)
+}
+
+// StopTask stops a running task.
+//
+// A task notification with status "stopped" follows in the message stream.
 func (c *Client) StopTask(ctx context.Context, taskID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
 	}
-
-	return c.query.StopTask(ctx, taskID)
+	return query.StopTask(ctx, taskID)
 }
 
-// RewindFiles sends a request to rewind files to a checkpoint.
-func (c *Client) RewindFiles(ctx context.Context, userMessageID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+// BackgroundTasks moves in-flight foreground work to the background.
+//
+// With a tool use ID it targets one task; with an empty string it backgrounds
+// all of them. Returns false only when an ID was given and matched nothing.
+func (c *Client) BackgroundTasks(ctx context.Context, toolUseID string) (bool, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return false, err
 	}
-
-	return c.query.RewindFiles(ctx, userMessageID)
+	return query.BackgroundTasks(ctx, toolUseID)
 }
 
-// GetMCPStatus retrieves the status of all MCP servers.
+// RewindFiles restores tracked files to their state at a user message.
+//
+// Requires AgentOptions.EnableFileCheckpointing. To learn the message UUIDs,
+// enable replay of user messages via ExtraArgs{"replay-user-messages": nil}.
+func (c *Client) RewindFiles(ctx context.Context, userMessageID string) (*types.RewindFilesResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.RewindFilesWithOptions(ctx, userMessageID, false)
+}
+
+// PreviewRewindFiles reports what RewindFiles would change, without touching
+// any files.
+func (c *Client) PreviewRewindFiles(ctx context.Context, userMessageID string) (*types.RewindFilesResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.RewindFilesWithOptions(ctx, userMessageID, true)
+}
+
+// SeedReadState primes the CLI's read-file cache with a path and mtime.
+//
+// Use it when the client observed a Read that has since dropped out of
+// context, so a later Edit does not fail with "file not read yet".
+func (c *Client) SeedReadState(ctx context.Context, path string, mtime int64) error {
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
+	}
+	return query.SeedReadState(ctx, path, mtime)
+}
+
+// ReadFile reads a file from the session's filesystem, subject to the same
+// read permissions as the Read tool.
+//
+// maxBytes of 0 uses the CLI default; encoding may be "utf-8" or "base64".
+func (c *Client) ReadFile(ctx context.Context, path string, maxBytes int, encoding string) (*types.ReadFileResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.ReadFile(ctx, path, maxBytes, encoding)
+}
+
+// GetMCPStatus returns the live connection status of every MCP server.
 func (c *Client) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return nil, errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
 	}
-
-	return c.query.GetMCPStatus(ctx)
+	return query.GetMCPStatus(ctx)
 }
 
-// ReconnectMCPServer sends a request to reconnect a specific MCP server.
+// ReconnectMCPServer retries a failed or disconnected MCP server.
 func (c *Client) ReconnectMCPServer(ctx context.Context, serverName string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
 	}
-
-	return c.query.ReconnectMCPServer(ctx, serverName)
+	return query.ReconnectMCPServer(ctx, serverName)
 }
 
-// ToggleMCPServer sends a request to enable or disable a specific MCP server.
+// ToggleMCPServer enables or disables an MCP server.
+//
+// Disabling disconnects it and removes its tools from the available set.
 func (c *Client) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
+	query, err := c.activeQuery()
+	if err != nil {
+		return err
+	}
+	return query.ToggleMCPServer(ctx, serverName, enabled)
+}
+
+// SetMCPServers replaces the set of dynamically-added MCP servers.
+//
+// Servers configured via settings files are unaffected, and plugin-owned
+// servers keep running unless named explicitly.
+func (c *Client) SetMCPServers(ctx context.Context, servers map[string]types.MCPServerConfig) (*types.MCPSetServersResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+
+	wire := make(map[string]any, len(servers))
+	for name, config := range servers {
+		if sdk, ok := config.(*types.SDKMCPServer); ok {
+			wire[name] = map[string]any{"type": "sdk", "name": sdk.Name}
+			continue
+		}
+		wire[name] = config
+	}
+	return query.SetMCPServers(ctx, wire)
+}
+
+// SetMCPPermissionModeOverride pins a per-server permission mode.
+//
+// Tighten-only: only types.PermissionModeDefault, types.PermissionModeAuto, or
+// nil to clear are accepted, and the override applies only where the session
+// mode would already auto-allow, so it can never widen privilege.
+//
+// The returned warning is set when the server name matches nothing currently
+// known; the override is still stored and applies once such a server connects.
+func (c *Client) SetMCPPermissionModeOverride(ctx context.Context, serverName string, mode *types.PermissionMode) (string, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return "", err
+	}
+	return query.SetMCPPermissionModeOverride(ctx, serverName, mode)
+}
+
+// GetContextUsage returns a breakdown of context window usage by category,
+// the same data the CLI's /context command shows.
+func (c *Client) GetContextUsage(ctx context.Context) (*types.ContextUsage, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.GetContextUsage(ctx)
+}
+
+// GetSessionUsage returns session cost and token totals, plus plan rate-limit
+// utilization where it applies.
+//
+// Experimental: this surface is unstable and may change.
+func (c *Client) GetSessionUsage(ctx context.Context) (*types.SessionUsage, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.GetSessionUsage(ctx)
+}
+
+// InitializationResult returns the initialize response captured at connect:
+// available commands, agents, models, account info, and output styles.
+func (c *Client) InitializationResult() *types.InitializeResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.connected || c.query == nil {
-		return errors.NewCLIConnectionError("Not connected. Call Connect() first.", nil)
+	if c.query == nil {
+		return nil
 	}
-
-	return c.query.ToggleMCPServer(ctx, serverName, enabled)
+	return types.InitializeResultFromMap(c.query.GetInitResult())
 }
 
-// GetServerInfo returns the initialization result from the Claude Code server.
+// Reinitialize re-sends the initialize request to a running CLI.
+//
+// Use it after a transport gap: the response carries any permission or dialog
+// requests the CLI is still blocked on, and the SDK redelivers them. Callbacks
+// should be idempotent, since a request whose response was lost will be
+// dispatched again.
+func (c *Client) Reinitialize(ctx context.Context) (*types.InitializeResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := query.Reinitialize(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return types.InitializeResultFromMap(raw), nil
+}
+
+// SupportedCommands returns the slash commands available in this session.
+func (c *Client) SupportedCommands() []types.SlashCommand {
+	if result := c.InitializationResult(); result != nil {
+		return result.Commands
+	}
+	return nil
+}
+
+// SupportedAgents returns the subagents available in this session.
+func (c *Client) SupportedAgents() []types.AgentInfo {
+	if result := c.InitializationResult(); result != nil {
+		return result.Agents
+	}
+	return nil
+}
+
+// AccountInfo returns information about the authenticated account.
+func (c *Client) AccountInfo() *types.AccountInfo {
+	if result := c.InitializationResult(); result != nil {
+		return result.Account
+	}
+	return nil
+}
+
+// SupportedModels returns the models this session may select.
+//
+// It asks the CLI rather than reading the initialize response, because on a
+// remote session the worker's provider and policy decide what is selectable.
+func (c *Client) SupportedModels(ctx context.Context) ([]types.ModelInfo, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	models, err := query.ListModels(ctx)
+	if err == nil {
+		return models, nil
+	}
+	// Older CLIs have no list_models request; fall back to initialize.
+	if result := c.InitializationResult(); result != nil && len(result.Models) > 0 {
+		return result.Models, nil
+	}
+	return nil, err
+}
+
+// ReloadPlugins reloads plugins from disk and returns the refreshed commands,
+// agents, and MCP server status.
+func (c *Client) ReloadPlugins(ctx context.Context) (*types.ReloadPluginsResult, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.ReloadPlugins(ctx)
+}
+
+// ReloadSkills reloads skills from disk and returns the refreshed list.
+func (c *Client) ReloadSkills(ctx context.Context) ([]types.SlashCommand, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.ReloadSkills(ctx)
+}
+
+// GetServerInfo returns the raw initialize response.
+//
+// Prefer InitializationResult, which is typed. This remains for callers that
+// need a field the typed struct does not model.
 func (c *Client) GetServerInfo() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -451,44 +562,48 @@ func (c *Client) GetServerInfo() map[string]any {
 	return c.query.GetInitResult()
 }
 
-// Close disconnects from Claude and cleans up resources.
+// activeQuery returns the control-protocol handler, or an error if the client
+// is not connected.
+func (c *Client) activeQuery() (*protocol.Query, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.requireConnectedLocked(); err != nil {
+		return nil, err
+	}
+	return c.query, nil
+}
+
+// Close ends the conversation and releases resources.
+//
+// The CLI is given a chance to flush its session file before being terminated,
+// so the final assistant message is not lost.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.connected = false
 
+	var err error
 	if c.query != nil {
-		_ = c.query.Close()
+		err = c.query.Close()
 		c.query = nil
 	}
+	c.transport = nil
 
-	if c.transport != nil {
-		_ = c.transport.Close()
-		c.transport = nil
-	}
-
-	return nil
+	return err
 }
 
-// Helper functions for creating pointers to primitive types
+// Helper functions for creating pointers to primitive types.
 
 // String returns a pointer to the given string.
-func String(s string) *string {
-	return &s
-}
+func String(s string) *string { return &s }
 
 // Int returns a pointer to the given int.
-func Int(i int) *int {
-	return &i
-}
+func Int(i int) *int { return &i }
 
 // Float64 returns a pointer to the given float64.
-func Float64(f float64) *float64 {
-	return &f
-}
+func Float64(f float64) *float64 { return &f }
 
 // Bool returns a pointer to the given bool.
-func Bool(b bool) *bool {
-	return &b
-}
+func Bool(b bool) *bool { return &b }

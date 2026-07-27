@@ -10,13 +10,43 @@ import (
 // ToolFunc is the function signature for MCP tool handlers.
 type ToolFunc func(ctx context.Context, args map[string]any) (map[string]any, error)
 
+// ToolAnnotations describes a tool's behavior to the client.
+type ToolAnnotations struct {
+	// Title is a human-readable name for the tool.
+	Title string `json:"title,omitempty"`
+	// ReadOnlyHint marks a tool that does not modify its environment.
+	ReadOnlyHint *bool `json:"readOnlyHint,omitempty"`
+	// DestructiveHint marks a tool that may perform destructive updates.
+	DestructiveHint *bool `json:"destructiveHint,omitempty"`
+	// IdempotentHint marks a tool where repeated calls with the same
+	// arguments have no additional effect.
+	IdempotentHint *bool `json:"idempotentHint,omitempty"`
+	// OpenWorldHint marks a tool that interacts with external entities.
+	OpenWorldHint *bool `json:"openWorldHint,omitempty"`
+}
+
 // Tool represents an MCP tool definition.
 type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
 	Handler     ToolFunc
-	Annotations map[string]any
+	// Annotations describe the tool's behavior to the client.
+	Annotations *ToolAnnotations
+	// MaxResultSizeChars caps this tool's result before the CLI spills it to
+	// a file. Zero uses the CLI default.
+	//
+	// The MCP schema strips unknown annotation fields, so this is carried in
+	// the tool's _meta under an Anthropic-namespaced key.
+	MaxResultSizeChars int
+}
+
+// meta renders the Anthropic-namespaced _meta payload, or nil if unset.
+func (t Tool) meta() map[string]any {
+	if t.MaxResultSizeChars <= 0 {
+		return nil
+	}
+	return map[string]any{"anthropic/maxResultSizeChars": t.MaxResultSizeChars}
 }
 
 // NewTool creates a new MCP tool definition.
@@ -61,7 +91,7 @@ func NewTool(name, description string, inputSchema map[string]any, handler ToolF
 //
 // Annotations provide metadata about the tool's behavior, such as whether it is
 // read-only, destructive, or accesses external systems.
-func NewToolWithAnnotations(name, description string, inputSchema map[string]any, handler ToolFunc, annotations map[string]any) Tool {
+func NewToolWithAnnotations(name, description string, inputSchema map[string]any, handler ToolFunc, annotations *ToolAnnotations) Tool {
 	return Tool{
 		Name:        name,
 		Description: description,
@@ -172,15 +202,68 @@ func ImageResult(base64Data, mimeType string) map[string]any {
 	}
 }
 
-// MultiResult combines multiple content items into a single result.
+// MultiResult combines several tool results into one.
+//
+// Content is accepted in either the []map[string]any form the helpers in this
+// package produce or the []any form that survives a JSON round trip, so
+// results assembled from decoded payloads combine correctly too.
 func MultiResult(items ...map[string]any) map[string]any {
 	content := make([]map[string]any, 0, len(items))
+	isError := false
+
 	for _, item := range items {
-		if c, ok := item["content"].([]map[string]any); ok {
+		if flag, ok := item["isError"].(bool); ok && flag {
+			isError = true
+		}
+		switch c := item["content"].(type) {
+		case []map[string]any:
 			content = append(content, c...)
+		case []any:
+			for _, block := range c {
+				if m, ok := block.(map[string]any); ok {
+					content = append(content, m)
+				}
+			}
 		}
 	}
-	return map[string]any{"content": content}
+
+	result := map[string]any{"content": content}
+	if isError {
+		result["isError"] = true
+	}
+	return result
+}
+
+// ResourceLinkResult creates a result referencing an external resource.
+func ResourceLinkResult(name, uri, description string) map[string]any {
+	link := map[string]any{"type": "resource_link", "uri": uri}
+	if name != "" {
+		link["name"] = name
+	}
+	if description != "" {
+		link["description"] = description
+	}
+	return map[string]any{"content": []map[string]any{link}}
+}
+
+// EmbeddedResourceResult creates a result embedding a text resource.
+func EmbeddedResourceResult(uri, mimeType, text string) map[string]any {
+	resource := map[string]any{"uri": uri, "text": text}
+	if mimeType != "" {
+		resource["mimeType"] = mimeType
+	}
+	return map[string]any{
+		"content": []map[string]any{{"type": "resource", "resource": resource}},
+	}
+}
+
+// AudioResult creates an audio result.
+func AudioResult(base64Data, mimeType string) map[string]any {
+	return map[string]any{
+		"content": []map[string]any{
+			{"type": "audio", "data": base64Data, "mimeType": mimeType},
+		},
+	}
 }
 
 // GetString safely extracts a string from args.

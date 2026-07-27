@@ -8,57 +8,104 @@ import (
 )
 
 func TestGetSessionMessages(t *testing.T) {
-	// Create a temporary directory structure
-	tmpDir, err := os.MkdirTemp("", "claude-sessions-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 
-	// Create a mock project directory
-	projectDir := getProjectDir(tmpDir)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
+	projectDir := getProjectDir(canonicalizePath(tmpDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create a mock session file
 	sessionID := "test-session-123"
-	messages := []map[string]any{
-		{"type": "user", "message": map[string]any{"role": "user", "content": "Hello"}},
-		{"type": "assistant", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "Hi!"}}}},
-		{"type": "result", "session_id": sessionID, "is_error": false},
+	// A realistic transcript: linked entries, plus a result row and a
+	// sidechain entry that are not part of the conversation.
+	entries := []map[string]any{
+		{"type": "user", "uuid": "u1", "sessionId": sessionID,
+			"message": map[string]any{"role": "user", "content": "Hello"}},
+		{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "sessionId": sessionID,
+			"message": map[string]any{"role": "assistant",
+				"content": []any{map[string]any{"type": "text", "text": "Hi!"}}}},
+		{"type": "user", "uuid": "sub1", "parentUuid": "a1", "isSidechain": true,
+			"message": map[string]any{"role": "user", "content": "subagent traffic"}},
+		{"type": "user", "uuid": "u2", "parentUuid": "a1", "sessionId": sessionID,
+			"message": map[string]any{"role": "user", "content": "Thanks"}},
+		{"type": "result", "uuid": "r1", "session_id": sessionID, "is_error": false},
 	}
 
-	filePath := filepath.Join(projectDir, sessionID+".jsonl")
-	file, err := os.Create(filePath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	writeTranscript(t, filepath.Join(projectDir, sessionID+".jsonl"), entries)
 
-	for _, msg := range messages {
-		data, _ := json.Marshal(msg)
-		_, _ = file.WriteString(string(data) + "\n")
-	}
-	file.Close()
-
-	// Test GetSessionMessages
 	result, err := GetSessionMessages(sessionID, &tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// Only the conversation chain: the sidechain and the result row are not
+	// part of it.
 	if len(result) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(result))
+		t.Fatalf("expected 3 conversation messages, got %d: %+v", len(result), result)
+	}
+	wantTypes := []string{"user", "assistant", "user"}
+	for i, want := range wantTypes {
+		if result[i].Type != want {
+			t.Errorf("message %d type = %q, want %q", i, result[i].Type, want)
+		}
+	}
+	if result[0].UUID != "u1" || result[2].UUID != "u2" {
+		t.Errorf("unexpected chain order: %q, %q", result[0].UUID, result[2].UUID)
+	}
+	if result[0].SessionID != sessionID {
+		t.Errorf("SessionID = %q", result[0].SessionID)
+	}
+	if result[0].Data == nil {
+		t.Error("Data should carry the raw transcript line")
+	}
+}
+
+// A transcript whose entries carry no UUIDs has no links to walk. Returning
+// nothing would be the wrong failure mode, so file order is used instead.
+func TestGetSessionMessagesWithoutUUIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+
+	projectDir := getProjectDir(canonicalizePath(tmpDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	if result[0].Type != "user" {
-		t.Errorf("expected first message type 'user', got '%s'", result[0].Type)
+	sessionID := "legacy-session"
+	writeTranscript(t, filepath.Join(projectDir, sessionID+".jsonl"), []map[string]any{
+		{"type": "user", "message": map[string]any{"role": "user", "content": "Hello"}},
+		{"type": "assistant", "message": map[string]any{"role": "assistant", "content": []any{}}},
+		{"type": "result", "is_error": false},
+	})
+
+	result, err := GetSessionMessages(sessionID, &tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if result[1].Type != "assistant" {
-		t.Errorf("expected second message type 'assistant', got '%s'", result[1].Type)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 conversation messages, got %d", len(result))
 	}
-	if result[2].Type != "result" {
-		t.Errorf("expected third message type 'result', got '%s'", result[2].Type)
+}
+
+// writeTranscript writes JSONL entries to a transcript file.
+func writeTranscript(t *testing.T, path string, entries []map[string]any) {
+	t.Helper()
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+
+	for _, entry := range entries {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(string(data) + "\n"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

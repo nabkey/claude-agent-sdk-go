@@ -67,6 +67,12 @@ type AssistantMessage struct {
 	ParentToolUseID *string                `json:"parent_tool_use_id,omitempty"`
 	Error           *AssistantMessageError `json:"error,omitempty"`
 	Usage           map[string]any         `json:"usage,omitempty"`
+	// MessageID is the API's message identifier.
+	MessageID string `json:"message_id,omitempty"`
+	// StopReason is why the model stopped generating.
+	StopReason string `json:"stop_reason,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	UUID       string `json:"uuid,omitempty"`
 }
 
 func (m *AssistantMessage) isMessage() {}
@@ -92,6 +98,23 @@ type ResultMessage struct {
 	Result           *string        `json:"result,omitempty"`
 	StructuredOutput any            `json:"structured_output,omitempty"`
 	StopReason       *string        `json:"stop_reason,omitempty"`
+	UUID             string         `json:"uuid,omitempty"`
+
+	// ModelUsage breaks token use and cost down per model.
+	ModelUsage map[string]ModelUsage `json:"modelUsage,omitempty"`
+	// PermissionDenials lists tool calls that were denied during the run.
+	PermissionDenials []PermissionDenial `json:"permission_denials,omitempty"`
+	// DeferredToolUse is set when a PreToolUse hook deferred a tool call,
+	// which ends the run and hands the call back for the caller to decide on.
+	DeferredToolUse *DeferredToolUse `json:"deferred_tool_use,omitempty"`
+	// Errors carries the structured error text when IsError is set.
+	Errors []string `json:"errors,omitempty"`
+	// APIErrorStatus is the HTTP status of the failing API call when IsError
+	// is set on an otherwise successful subtype.
+	APIErrorStatus *int `json:"api_error_status,omitempty"`
+	// TerminalReason explains why the query loop stopped. An aborted reason
+	// means the turn was interrupted. Empty on CLIs that do not report it.
+	TerminalReason TerminalReason `json:"terminal_reason,omitempty"`
 }
 
 func (m *ResultMessage) isMessage() {}
@@ -333,13 +356,104 @@ type ToolConfig struct {
 
 // AgentDefinition defines a custom agent configuration.
 type AgentDefinition struct {
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Tools       []string `json:"tools,omitempty"`
-	Model       *string  `json:"model,omitempty"` // "sonnet", "opus", "haiku", "inherit"
-	Skills      []string `json:"skills,omitempty"`
-	Memory      *string  `json:"memory,omitempty"`
-	MCPServers  []any    `json:"mcpServers,omitempty"`
+	// Description tells the model when to use this agent.
+	Description string `json:"description"`
+	// Prompt is the agent's system prompt.
+	Prompt string `json:"prompt"`
+	// Tools restricts the agent's tools. Omit to inherit the parent's.
+	Tools []string `json:"tools,omitempty"`
+	// DisallowedTools removes tools for this agent. An MCP server-level spec
+	// ("mcp__server", "mcp__server__*", "mcp__*") removes every tool from
+	// that server, or all MCP tools.
+	DisallowedTools []string `json:"disallowedTools,omitempty"`
+	// Model is an alias ("opus", "sonnet", "haiku", "inherit") or a full
+	// model ID. Omit or use "inherit" for the main model.
+	Model *string `json:"model,omitempty"`
+	// Skills are preloaded into the agent's context.
+	Skills []string `json:"skills,omitempty"`
+	// Memory scopes auto-loaded agent memory files.
+	Memory *AgentMemoryScope `json:"memory,omitempty"`
+	// MCPServers is a list of server names, or inline {name: config} maps.
+	MCPServers []any `json:"mcpServers,omitempty"`
+	// InitialPrompt is auto-submitted as the first user turn when this agent
+	// is the main-thread agent. Slash commands are processed.
+	InitialPrompt *string `json:"initialPrompt,omitempty"`
+	// MaxTurns bounds the agent's agentic iterations.
+	MaxTurns *int `json:"maxTurns,omitempty"`
+	// Background runs the agent as a non-blocking task when invoked.
+	Background *bool `json:"background,omitempty"`
+	// Effort is a named level or an integer.
+	Effort any `json:"effort,omitempty"`
+	// PermissionMode controls how this agent's tool calls are handled.
+	PermissionMode *PermissionMode `json:"permissionMode,omitempty"`
+	// Observer names an agent type auto-spawned as a background observer
+	// whenever this agent runs. It receives read-only activity digests and
+	// never participates in the task.
+	Observer *string `json:"observer,omitempty"`
+	// ObserverMessage is appended to each activity digest sent to the
+	// observer. Blank values are ignored.
+	ObserverMessage *string `json:"observerMessage,omitempty"`
+}
+
+// AgentMemoryScope selects where an agent's memory files are auto-loaded from.
+type AgentMemoryScope string
+
+const (
+	// AgentMemoryUser reads ~/.claude/agent-memory/<agentType>/.
+	AgentMemoryUser AgentMemoryScope = "user"
+	// AgentMemoryProject reads .claude/agent-memory/<agentType>/.
+	AgentMemoryProject AgentMemoryScope = "project"
+	// AgentMemoryLocal reads .claude/agent-memory-local/<agentType>/.
+	AgentMemoryLocal AgentMemoryScope = "local"
+)
+
+// ToMap renders the definition for the initialize request, omitting unset
+// optional fields so the CLI sees only what the caller configured.
+func (a AgentDefinition) ToMap() map[string]any {
+	m := map[string]any{
+		"description": a.Description,
+		"prompt":      a.Prompt,
+	}
+	if a.Tools != nil {
+		m["tools"] = a.Tools
+	}
+	if a.DisallowedTools != nil {
+		m["disallowedTools"] = a.DisallowedTools
+	}
+	if a.Model != nil {
+		m["model"] = *a.Model
+	}
+	if a.Skills != nil {
+		m["skills"] = a.Skills
+	}
+	if a.Memory != nil {
+		m["memory"] = string(*a.Memory)
+	}
+	if a.MCPServers != nil {
+		m["mcpServers"] = a.MCPServers
+	}
+	if a.InitialPrompt != nil {
+		m["initialPrompt"] = *a.InitialPrompt
+	}
+	if a.MaxTurns != nil {
+		m["maxTurns"] = *a.MaxTurns
+	}
+	if a.Background != nil {
+		m["background"] = *a.Background
+	}
+	if a.Effort != nil {
+		m["effort"] = a.Effort
+	}
+	if a.PermissionMode != nil {
+		m["permissionMode"] = string(*a.PermissionMode)
+	}
+	if a.Observer != nil {
+		m["observer"] = *a.Observer
+	}
+	if a.ObserverMessage != nil {
+		m["observerMessage"] = *a.ObserverMessage
+	}
+	return m
 }
 
 // SystemPromptPreset defines a system prompt preset configuration.
@@ -347,6 +461,16 @@ type SystemPromptPreset struct {
 	Type   string  `json:"type"`   // "preset"
 	Preset string  `json:"preset"` // "claude_code"
 	Append *string `json:"append,omitempty"`
+	// ExcludeDynamicSections strips per-user dynamic sections (working
+	// directory, auto-memory, git status) from the system prompt so it stays
+	// static and cacheable across users. The stripped content is re-injected
+	// into the first user message, so the model still has access to it.
+	//
+	// Use this when many users share the same preset prompt and you want the
+	// prompt-caching prefix to hit cross-user. The tradeoff is that this
+	// context appears in a user message instead of the system prompt, so it
+	// steers the model marginally less authoritatively.
+	ExcludeDynamicSections *bool `json:"exclude_dynamic_sections,omitempty"`
 }
 
 // ToolsPreset defines a tools preset configuration.
@@ -427,14 +551,25 @@ func NewThinkingDisabled() *ThinkingConfigDisabled {
 
 // RateLimitInfo contains rate limit information.
 type RateLimitInfo struct {
-	Status                RateLimitStatus  `json:"status"`
-	ResetsAt              *string          `json:"resets_at,omitempty"`
+	Status RateLimitStatus `json:"status"`
+	// ResetsAt is the Unix timestamp when the window resets.
+	ResetsAt              *int64           `json:"resets_at,omitempty"`
 	RateLimitType         *RateLimitType   `json:"rate_limit_type,omitempty"`
 	Utilization           *float64         `json:"utilization,omitempty"`
 	OverageStatus         *RateLimitStatus `json:"overage_status,omitempty"`
 	OverageResetsAt       *int64           `json:"overage_resets_at,omitempty"`
 	OverageDisabledReason *string          `json:"overage_disabled_reason,omitempty"`
-	Raw                   map[string]any   `json:"raw,omitempty"`
+	// IsUsingOverage reports whether overage credits are currently in use.
+	IsUsingOverage *bool `json:"is_using_overage,omitempty"`
+	// SurpassedThreshold is the utilization threshold just crossed.
+	SurpassedThreshold *float64 `json:"surpassed_threshold,omitempty"`
+	// ErrorCode is set when the limit produced an actionable error, e.g.
+	// credits_required.
+	ErrorCode *string `json:"error_code,omitempty"`
+	// CanUserPurchaseCredits reports whether the user can buy more credits.
+	CanUserPurchaseCredits *bool `json:"can_user_purchase_credits,omitempty"`
+	// Raw is the full payload, including fields not modeled here.
+	Raw map[string]any `json:"raw,omitempty"`
 }
 
 // RateLimitEvent represents a rate limit event message.
@@ -506,17 +641,37 @@ func (m *ChannelMessage) isMessage() {}
 
 // SDKSessionInfo contains information about a session.
 type SDKSessionInfo struct {
-	SessionID   string     `json:"session_id"`
-	CWD         string     `json:"cwd"`
-	FirstPrompt string     `json:"first_prompt"`
-	LastPrompt  string     `json:"last_prompt"`
+	SessionID string `json:"session_id"`
+	// Summary is the display title: a custom title if set, otherwise the
+	// first prompt.
+	Summary string `json:"summary"`
+	// LastModified is the last-modified time in Unix epoch milliseconds.
+	LastModified int64 `json:"last_modified"`
+	// FileSize is the transcript size in bytes. Only populated for local
+	// JSONL storage; zero for remote backends.
+	FileSize int64 `json:"file_size,omitempty"`
+	// CustomTitle is a user-set or AI-generated title.
+	CustomTitle *string    `json:"custom_title,omitempty"`
+	CWD         string     `json:"cwd,omitempty"`
+	FirstPrompt string     `json:"first_prompt,omitempty"`
+	LastPrompt  string     `json:"last_prompt,omitempty"`
 	GitBranch   *string    `json:"git_branch,omitempty"`
 	Tag         *string    `json:"tag,omitempty"`
 	CreatedAt   *time.Time `json:"created_at,omitempty"`
 }
 
-// SessionMessage represents a single message in a session transcript.
+// SessionMessage is a user or assistant message from a session transcript.
 type SessionMessage struct {
-	Type string         `json:"type"`
-	Data map[string]any `json:"data,omitempty"`
+	// Type is "user" or "assistant".
+	Type string `json:"type"`
+	// UUID uniquely identifies the message.
+	UUID string `json:"uuid,omitempty"`
+	// SessionID is the session the message belongs to.
+	SessionID string `json:"session_id,omitempty"`
+	// Message is the raw API message (role, content, and so on).
+	Message any `json:"message,omitempty"`
+	// ParentToolUseID is set for tool-use sidechain messages.
+	ParentToolUseID *string `json:"parent_tool_use_id,omitempty"`
+	// Data is the full raw transcript line, including fields not modeled here.
+	Data map[string]any `json:"-"`
 }

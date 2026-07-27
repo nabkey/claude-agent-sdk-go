@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,15 @@ type Query struct {
 	// There is no corresponding CLI flag.
 	agentProgressSummaries bool
 
+	// initConfig carries the rest of the initialize payload.
+	initConfig *InitConfig
+
+	onElicitation ElicitationCallback
+	onUserDialog  UserDialogCallback
+
+	// mirror receives transcript_mirror frames when a SessionStore is set.
+	mirror MirrorSink
+
 	// Control protocol state
 	pendingResponses map[string]chan *ControlResult
 	hookCallbacks    map[string]types.HookCallback
@@ -41,13 +51,36 @@ type Query struct {
 	hookMu           sync.Mutex
 
 	// Message stream
-	messageChan        chan map[string]any
-	errorChan          chan error
-	initialized        bool
-	closed             atomic.Bool
-	initResult         map[string]any
-	firstResultEvent   chan struct{}
-	streamCloseTimeout time.Duration
+	messageChan      chan map[string]any
+	errorChan        chan error
+	initialized      bool
+	closed           atomic.Bool
+	initResult       map[string]any
+	firstResultEvent chan struct{}
+	resultEventOnce  sync.Once
+
+	// terminalErr is the error that ended the message stream, surfaced to
+	// consumers through Err() after the channel closes.
+	terminalErr   error
+	terminalErrMu sync.Mutex
+
+	// inflightTasks holds task IDs of delegated agent work that has started
+	// but not finished. A result frame ends one turn, not the run: background
+	// subagents keep running past it and still need stdin for hook and
+	// SDK-MCP control responses, so stdin must not close while any are live.
+	inflightTasks map[string]struct{}
+	taskMu        sync.Mutex
+
+	// lastErrorResultText carries the structured errors from a result frame
+	// with is_error=true. The CLI then exits non-zero on purpose, and the
+	// resulting "exit code 1" ProcessError carries no information, so it is
+	// replaced with this.
+	lastErrorResultText string
+
+	// inflightRequests maps a control request_id to the cancel func for its
+	// handler, so control_cancel_request can abandon it.
+	inflightRequests map[string]context.CancelFunc
+	requestMu        sync.Mutex
 
 	// Context for cancellation
 	ctx    context.Context
@@ -89,7 +122,86 @@ type MCPTool struct {
 	Description string
 	InputSchema map[string]any
 	Handler     func(ctx context.Context, args map[string]any) (map[string]any, error)
-	Annotations map[string]any
+	Annotations any
+	Meta        map[string]any
+}
+
+// InitConfig is the configuration carried on the initialize control request
+// rather than as CLI flags.
+//
+// Several of these have no flag equivalent at all; others are sent here
+// because the payload can exceed a comfortable argv size.
+type InitConfig struct {
+	// Agents are custom subagent definitions, keyed by agent name.
+	Agents map[string]any
+	// SystemPrompt is the block form of the system prompt. Include
+	// types.SystemPromptDynamicBoundary to mark the cacheable prefix.
+	SystemPrompt []string
+	// AppendSystemPrompt is appended to the system prompt.
+	AppendSystemPrompt *string
+	// ExcludeDynamicSections strips per-user dynamic sections from a preset
+	// prompt so it stays cacheable across users.
+	ExcludeDynamicSections *bool
+	// Title names a new session.
+	Title *string
+	// Skills is an explicit skill allowlist. Omitted means no filter.
+	Skills []string
+	// ToolAliases redirects model-emitted tool names before resolution.
+	ToolAliases map[string]string
+	// PlanModeInstructions replaces plan mode's default workflow body.
+	PlanModeInstructions *string
+	// JSONSchema requests structured output matching this schema.
+	JSONSchema map[string]any
+	// PromptSuggestions emits a predicted next prompt after each turn.
+	PromptSuggestions bool
+	// ForwardSubagentText forwards subagent text and thinking blocks.
+	ForwardSubagentText bool
+	// SupportedDialogKinds declares which dialogs the host can render.
+	SupportedDialogKinds []string
+}
+
+// apply writes the configured fields onto an initialize request, omitting
+// anything unset so older CLIs are not handed unknown keys with empty values.
+func (c *InitConfig) apply(request map[string]any) {
+	if c == nil {
+		return
+	}
+	if len(c.Agents) > 0 {
+		request["agents"] = c.Agents
+	}
+	if len(c.SystemPrompt) > 0 {
+		request["systemPrompt"] = c.SystemPrompt
+	}
+	if c.AppendSystemPrompt != nil {
+		request["appendSystemPrompt"] = *c.AppendSystemPrompt
+	}
+	if c.ExcludeDynamicSections != nil {
+		request["excludeDynamicSections"] = *c.ExcludeDynamicSections
+	}
+	if c.Title != nil {
+		request["title"] = *c.Title
+	}
+	if len(c.Skills) > 0 {
+		request["skills"] = c.Skills
+	}
+	if len(c.ToolAliases) > 0 {
+		request["toolAliases"] = c.ToolAliases
+	}
+	if c.PlanModeInstructions != nil {
+		request["planModeInstructions"] = *c.PlanModeInstructions
+	}
+	if len(c.JSONSchema) > 0 {
+		request["jsonSchema"] = c.JSONSchema
+	}
+	if c.PromptSuggestions {
+		request["promptSuggestions"] = true
+	}
+	if c.ForwardSubagentText {
+		request["forwardSubagentText"] = true
+	}
+	if len(c.SupportedDialogKinds) > 0 {
+		request["supportedDialogKinds"] = c.SupportedDialogKinds
+	}
 }
 
 // QueryOptions configures a new Query instance.
@@ -104,7 +216,34 @@ type QueryOptions struct {
 	// AgentProgressSummaries enables AI-generated progress summaries for
 	// subagents. Sent on the initialize request; there is no CLI flag.
 	AgentProgressSummaries bool
+
+	// InitConfig carries the rest of the initialize payload.
+	InitConfig *InitConfig
+
+	// OnElicitation handles MCP elicitation control requests.
+	OnElicitation ElicitationCallback
+
+	// OnUserDialog renders host-side blocking dialogs.
+	OnUserDialog UserDialogCallback
+
+	// Mirror receives transcript_mirror frames for SessionStore mirroring.
+	Mirror MirrorSink
 }
+
+// MirrorSink consumes transcript mirror frames.
+//
+// Enqueue must not block the read loop; a slow store is expected to buffer
+// and flush asynchronously.
+type MirrorSink interface {
+	Enqueue(filePath string, entries []map[string]any)
+	Flush()
+}
+
+// ElicitationCallback handles an MCP server's request for user input.
+type ElicitationCallback func(context.Context, types.ElicitationRequest) (types.ElicitationResult, error)
+
+// UserDialogCallback renders a blocking dialog on the CLI's behalf.
+type UserDialogCallback func(context.Context, types.UserDialogRequest) (types.UserDialogResult, error)
 
 // NewQuery creates a new Query instance.
 func NewQuery(opts *QueryOptions) *Query {
@@ -121,12 +260,17 @@ func NewQuery(opts *QueryOptions) *Query {
 		sdkMCPServers:          opts.SDKMCPServers,
 		initializeTimeout:      opts.InitializeTimeout,
 		agentProgressSummaries: opts.AgentProgressSummaries,
+		initConfig:             opts.InitConfig,
+		onElicitation:          opts.OnElicitation,
+		onUserDialog:           opts.OnUserDialog,
+		mirror:                 opts.Mirror,
 		pendingResponses:       make(map[string]chan *ControlResult),
 		hookCallbacks:          make(map[string]types.HookCallback),
 		messageChan:            make(chan map[string]any, 100),
 		errorChan:              make(chan error, 1),
 		firstResultEvent:       make(chan struct{}),
-		streamCloseTimeout:     60 * time.Second,
+		inflightTasks:          make(map[string]struct{}),
+		inflightRequests:       make(map[string]context.CancelFunc),
 		ctx:                    ctx,
 		cancel:                 cancel,
 	}
@@ -205,6 +349,7 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 		sort.Strings(names)
 		request["sdkMcpServers"] = names
 	}
+	q.initConfig.apply(request)
 
 	initCtx, cancel := context.WithTimeout(ctx, q.initializeTimeout)
 	defer cancel()
@@ -219,9 +364,39 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 	return response, nil
 }
 
+// deferringTaskTypes are the task types whose completion runs a follow-up
+// turn, and which therefore may still need the control channel after a turn's
+// result frame.
+//
+// This mirrors the set the CLI itself holds a result back for. Background
+// shells and monitors are deliberately excluded: they can run indefinitely by
+// design, so tracking one would withhold the stdin close forever rather than
+// briefly.
+var deferringTaskTypes = map[string]struct{}{
+	"local_agent":    {},
+	"local_workflow": {},
+}
+
+// terminalTaskStatuses are the task statuses meaning the task has finished.
+// The vocabulary spans both lifecycle frames: task_notification reports
+// "stopped" (the CLI's mapped form of a killed task) while task_updated
+// reports the raw "killed".
+var terminalTaskStatuses = map[string]struct{}{
+	"completed": {},
+	"failed":    {},
+	"stopped":   {},
+	"killed":    {},
+}
+
 // readMessages reads messages from transport and routes them.
 func (q *Query) readMessages(ctx context.Context) {
 	defer close(q.messageChan)
+	// Unblock anything waiting on a run-ending result: on an early exit the
+	// result may never arrive, and a waiter would otherwise stall.
+	defer q.signalResultEvent()
+	// Flush buffered mirror entries so an early EOF or transport error does
+	// not drop what was batched this turn.
+	defer q.flushMirror()
 
 	msgChan, errChan := q.transport.ReadMessages(ctx)
 
@@ -233,20 +408,8 @@ func (q *Query) readMessages(ctx context.Context) {
 			return
 		case err, ok := <-errChan:
 			if ok && err != nil {
-				// Signal pending control requests
-				q.pendingMu.Lock()
-				for _, ch := range q.pendingResponses {
-					select {
-					case ch <- &ControlResult{Error: err}:
-					default:
-					}
-				}
-				q.pendingMu.Unlock()
-
-				select {
-				case q.errorChan <- err:
-				default:
-				}
+				q.failPendingRequests(err)
+				q.setTerminalError(err)
 			}
 			return
 		case msg, ok := <-msgChan:
@@ -266,21 +429,22 @@ func (q *Query) readMessages(ctx context.Context) {
 				continue
 
 			case "control_request":
-				go q.handleControlRequest(ctx, msg)
+				q.spawnControlRequestHandler(ctx, msg)
 				continue
 
 			case "control_cancel_request":
-				// TODO: Implement cancellation support
+				q.cancelControlRequest(msg)
 				continue
 
-			case "result":
-				// Signal first result for stream closure
-				select {
-				case <-q.firstResultEvent:
-				default:
-					close(q.firstResultEvent)
-				}
+			case "transcript_mirror":
+				// Mirror frames feed the SessionStore write path. They are
+				// bookkeeping, not conversation, so they never reach
+				// consumers.
+				q.enqueueMirrorFrame(msg)
+				continue
 			}
+
+			q.trackLifecycle(msg, msgType)
 
 			// Regular messages go to the stream
 			select {
@@ -291,6 +455,218 @@ func (q *Query) readMessages(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// trackLifecycle maintains the in-flight task ledger and the run-ending result
+// signal, and remembers structured errors from an error result.
+func (q *Query) trackLifecycle(msg map[string]any, msgType string) {
+	if msgType == "system" {
+		q.trackTaskLifecycle(msg)
+	}
+
+	if msgType != "result" {
+		// Anything other than the post-turn session_state_changed marker means
+		// the conversation moved on, so a later process error is a fresh crash
+		// rather than the expected exit from a prior error result.
+		if !(msgType == "system" && getString(msg, "subtype") == "session_state_changed") {
+			q.lastErrorResultText = ""
+		}
+		return
+	}
+
+	if isError, _ := msg["is_error"].(bool); isError {
+		q.lastErrorResultText = errorTextFromResult(msg)
+	} else {
+		q.lastErrorResultText = ""
+	}
+
+	q.flushMirror()
+
+	// A result ends one turn. Only signal the run as ending -- which releases
+	// the stdin close -- when no delegated agent work is still in flight.
+	q.taskMu.Lock()
+	inflight := len(q.inflightTasks)
+	q.taskMu.Unlock()
+	if inflight == 0 {
+		q.signalResultEvent()
+	}
+}
+
+// errorTextFromResult renders the structured errors on an error result.
+func errorTextFromResult(msg map[string]any) string {
+	if raw, ok := msg["errors"].([]any); ok && len(raw) > 0 {
+		parts := make([]string, 0, len(raw))
+		for _, e := range raw {
+			if s, ok := e.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "; ")
+		}
+	}
+	if subtype := getString(msg, "subtype"); subtype != "" {
+		return subtype
+	}
+	return "unknown error"
+}
+
+// trackTaskLifecycle adds and removes delegated agent work from the ledger.
+//
+// task_started marks a task in flight; task_notification, or a task_updated
+// patch carrying a terminal status, clears it. Terminal completion can arrive
+// as either frame -- not every terminal task emits a notification -- so both
+// are handled.
+func (q *Query) trackTaskLifecycle(msg map[string]any) {
+	taskID := getString(msg, "task_id")
+	if taskID == "" {
+		return
+	}
+
+	switch getString(msg, "subtype") {
+	case "task_started":
+		if _, deferring := deferringTaskTypes[getString(msg, "task_type")]; !deferring {
+			return
+		}
+		q.taskMu.Lock()
+		q.inflightTasks[taskID] = struct{}{}
+		q.taskMu.Unlock()
+
+	case "task_notification":
+		q.taskMu.Lock()
+		delete(q.inflightTasks, taskID)
+		q.taskMu.Unlock()
+
+	case "task_updated":
+		patch, ok := msg["patch"].(map[string]any)
+		if !ok {
+			return
+		}
+		if _, terminal := terminalTaskStatuses[getString(patch, "status")]; !terminal {
+			return
+		}
+		q.taskMu.Lock()
+		delete(q.inflightTasks, taskID)
+		q.taskMu.Unlock()
+	}
+}
+
+// enqueueMirrorFrame hands a transcript mirror frame to the configured sink.
+func (q *Query) enqueueMirrorFrame(msg map[string]any) {
+	if q.mirror == nil {
+		return
+	}
+
+	filePath := getString(msg, "filePath")
+	raw, ok := msg["entries"].([]any)
+	if !ok {
+		return
+	}
+
+	entries := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if entry, ok := item.(map[string]any); ok {
+			entries = append(entries, entry)
+		}
+	}
+	if len(entries) > 0 {
+		q.mirror.Enqueue(filePath, entries)
+	}
+}
+
+// flushMirror drains buffered mirror entries, if a sink is configured.
+func (q *Query) flushMirror() {
+	if q.mirror != nil {
+		q.mirror.Flush()
+	}
+}
+
+// signalResultEvent releases waiters blocked on a run-ending result.
+func (q *Query) signalResultEvent() {
+	q.resultEventOnce.Do(func() { close(q.firstResultEvent) })
+}
+
+// setTerminalError records the error that ended the stream.
+//
+// A CLI that emitted a result with is_error=true then exits non-zero on
+// purpose, for shell-script consumers. The trailing ProcessError carries no
+// information beyond "exit code 1", so it is replaced with the structured
+// error the CLI already reported.
+func (q *Query) setTerminalError(err error) {
+	var processErr *errors.ProcessError
+	if errors.As(err, &processErr) && q.lastErrorResultText != "" {
+		err = fmt.Errorf("claude code returned an error result: %s", q.lastErrorResultText)
+	}
+
+	q.terminalErrMu.Lock()
+	if q.terminalErr == nil {
+		q.terminalErr = err
+	}
+	q.terminalErrMu.Unlock()
+
+	select {
+	case q.errorChan <- err:
+	default:
+	}
+}
+
+// failPendingRequests wakes every in-flight control request so callers fail
+// fast rather than waiting out their timeout.
+func (q *Query) failPendingRequests(err error) {
+	q.pendingMu.Lock()
+	defer q.pendingMu.Unlock()
+	for _, ch := range q.pendingResponses {
+		select {
+		case ch <- &ControlResult{Error: err}:
+		default:
+		}
+	}
+}
+
+// spawnControlRequestHandler runs a control request handler, tracking it so a
+// control_cancel_request can abandon it.
+func (q *Query) spawnControlRequestHandler(ctx context.Context, msg map[string]any) {
+	requestID, _ := msg["request_id"].(string)
+
+	handlerCtx, cancel := context.WithCancel(ctx)
+	if requestID != "" {
+		q.requestMu.Lock()
+		q.inflightRequests[requestID] = cancel
+		q.requestMu.Unlock()
+	}
+
+	go func() {
+		defer cancel()
+		defer func() {
+			if requestID == "" {
+				return
+			}
+			q.requestMu.Lock()
+			delete(q.inflightRequests, requestID)
+			q.requestMu.Unlock()
+		}()
+		q.handleControlRequest(handlerCtx, msg)
+	}()
+}
+
+// cancelControlRequest abandons an in-flight handler at the CLI's request.
+//
+// The CLI has already given up on the request, so the handler is cancelled and
+// no response is written.
+func (q *Query) cancelControlRequest(msg map[string]any) {
+	requestID, _ := msg["request_id"].(string)
+	if requestID == "" {
+		return
+	}
+
+	q.requestMu.Lock()
+	cancel, ok := q.inflightRequests[requestID]
+	delete(q.inflightRequests, requestID)
+	q.requestMu.Unlock()
+
+	if ok {
+		cancel()
 	}
 }
 
@@ -339,6 +715,12 @@ func (q *Query) handleControlRequest(ctx context.Context, msg map[string]any) {
 	case "mcp_message":
 		responseData, err = q.handleMCPMessage(ctx, request)
 
+	case "elicitation":
+		responseData, err = q.handleElicitation(ctx, request)
+
+	case "request_user_dialog":
+		responseData, err = q.handleUserDialog(ctx, request)
+
 	default:
 		err = fmt.Errorf("unsupported control request subtype: %s", subtype)
 	}
@@ -365,8 +747,14 @@ func (q *Query) handleControlRequest(ctx context.Context, msg map[string]any) {
 		}
 	}
 
+	// A cancelled request has already been abandoned by the CLI; writing a
+	// stale response would desynchronize the channel.
+	if ctx.Err() != nil {
+		return
+	}
+
 	data, _ := json.Marshal(response)
-	_ = q.transport.Write(ctx, string(data)+"\n")
+	_ = q.transport.Write(context.WithoutCancel(ctx), string(data)+"\n")
 }
 
 // handleToolPermission handles tool permission requests.
@@ -455,6 +843,72 @@ func (q *Query) handleHookCallback(ctx context.Context, request map[string]any) 
 
 	// Convert output to map
 	return hookOutputToMap(output), nil
+}
+
+// handleElicitation forwards an MCP server's request for user input to the
+// caller's callback.
+//
+// With no callback configured the request is declined, matching the reference
+// SDKs: an unanswered elicitation would block the server indefinitely.
+func (q *Query) handleElicitation(ctx context.Context, request map[string]any) (map[string]any, error) {
+	if q.onElicitation == nil {
+		return map[string]any{"action": string(types.ElicitationDecline)}, nil
+	}
+
+	req := types.ElicitationRequest{
+		ServerName: getString(request, "server_name"),
+		Mode:       types.ElicitationMode(getString(request, "mode")),
+		Message:    getString(request, "message"),
+		URL:        getString(request, "url"),
+		Raw:        request,
+	}
+	if schema, ok := request["requestedSchema"].(map[string]any); ok {
+		req.RequestedSchema = schema
+	}
+
+	result, err := q.onElicitation(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	response := map[string]any{"action": string(result.Action)}
+	if result.Content != nil {
+		response["content"] = result.Content
+	}
+	return response, nil
+}
+
+// handleUserDialog asks the host to render a blocking dialog.
+//
+// A host that did not supply a callback must not answer: on a multi-client
+// session another attached client may be the declared renderer, and replying
+// here would settle the dialog out from under it. Returning an error leaves
+// the dialog for the CLI's own park deadline to resolve.
+func (q *Query) handleUserDialog(ctx context.Context, request map[string]any) (map[string]any, error) {
+	if q.onUserDialog == nil {
+		return nil, fmt.Errorf("no user dialog handler configured")
+	}
+
+	req := types.UserDialogRequest{
+		DialogKind: getString(request, "dialog_kind"),
+	}
+	if payload, ok := request["payload"].(map[string]any); ok {
+		req.Payload = payload
+	}
+	if id := getString(request, "tool_use_id"); id != "" {
+		req.ToolUseID = &id
+	}
+
+	result, err := q.onUserDialog(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	response := map[string]any{"behavior": string(result.Behavior)}
+	if result.Result != nil {
+		response["result"] = result.Result
+	}
+	return response, nil
 }
 
 // handleMCPMessage handles MCP server requests.
@@ -688,16 +1142,34 @@ func (q *Query) GetInitResult() map[string]any {
 	return q.initResult
 }
 
-// WaitForFirstResult waits for the first result message.
-func (q *Query) WaitForFirstResult(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-q.firstResultEvent:
-		return nil
-	case <-time.After(q.streamCloseTimeout):
-		return nil
+// Err returns the error that terminated the message stream, or nil if it
+// ended cleanly. Call it after the ReceiveMessages channel closes.
+func (q *Query) Err() error {
+	q.terminalErrMu.Lock()
+	defer q.terminalErrMu.Unlock()
+	return q.terminalErr
+}
+
+// WaitForResultAndEndInput waits for a run-ending result if the session needs
+// the control channel, then closes stdin.
+//
+// The control protocol requires stdin to stay open for the whole conversation,
+// so when hooks or SDK MCP servers are configured this blocks until a result
+// arrives with no delegated agent work in flight. Closing earlier silently
+// disables hooks and fails SDK-MCP calls with "stream closed".
+//
+// Sessions with neither hooks nor SDK MCP servers never need to read from
+// stdin again, so input ends immediately.
+func (q *Query) WaitForResultAndEndInput(ctx context.Context) error {
+	if len(q.sdkMCPServers) > 0 || len(q.hooks) > 0 {
+		select {
+		case <-q.firstResultEvent:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-q.ctx.Done():
+		}
 	}
+	return q.transport.EndInput()
 }
 
 // HandleRequest processes an MCP request.
@@ -733,6 +1205,9 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 			}
 			if tool.Annotations != nil {
 				toolMap["annotations"] = tool.Annotations
+			}
+			if tool.Meta != nil {
+				toolMap["_meta"] = tool.Meta
 			}
 			tools[i] = toolMap
 		}
@@ -1007,6 +1482,13 @@ func getMap(m map[string]any, key string) map[string]any {
 		return v
 	}
 	return nil
+}
+
+func getInt(m map[string]any, key string) int {
+	if v, ok := m[key].(float64); ok {
+		return int(v)
+	}
+	return 0
 }
 
 func getBool(m map[string]any, key string) bool {

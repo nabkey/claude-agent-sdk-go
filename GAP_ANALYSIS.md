@@ -5,11 +5,19 @@
 **Reference — Python:** `claude-agent-sdk` **0.2.128** (~11.3k LOC)
 **Reference — TypeScript:** `@anthropic-ai/claude-agent-sdk` **0.3.220** (bundles Claude Code CLI 2.1.220; ~11.4k LOC of `.d.ts` alone)
 
-> **Status: Phase 1 is complete** (see §12). Every wire-protocol divergence in
-> §1 has been fixed and is covered by golden-argv / control-payload tests, and
-> the Windows hardening from the cross-cutting section has landed. §2–§11
-> describe the remaining gaps and are unchanged. Items below that are done are
-> marked **[FIXED]**.
+> **Status: all six phases are complete.** Every gap catalogued below has been
+> closed — the wire-protocol divergences (§1), the `--print` architectural fork
+> (§2), the missing options (§3), control methods (§4), hook events (§5),
+> message types (§6), the `SessionStore` subsystem (§7), the MCP gaps (§8), and
+> the robustness and lifecycle items (§9).
+>
+> This document is retained as the record of what was wrong and why each fix
+> takes the shape it does. Section headings are marked **[FIXED]**; the
+> scorecard in §11 and the plan in §12 reflect the finished state.
+>
+> Two items in §10 were deliberately *not* "fixed": `Channels` is retained as a
+> local extension (it has no counterpart in either reference SDK), and the
+> Go-idiomatic conveniences are kept as-is.
 
 Method: both reference SDKs were downloaded and read in full — Python source (`types.py`, `client.py`,
 `_internal/{query,message_parser,transport/subprocess_cli,sessions,session_*}.py`), TypeScript type
@@ -190,7 +198,7 @@ cmd.exe metacharacter rejection for `resume`/`session_id`.
 
 ---
 
-## §2. The architectural fork: `--print` vs. always-streaming
+## §2. The architectural fork: `--print` vs. always-streaming  **[FIXED]**
 
 `query.go` builds `--print -- <prompt>` for one-shot queries and only uses
 `--input-format stream-json` for `Client`. Both reference SDKs deleted the non-streaming path:
@@ -226,7 +234,7 @@ several are accepted at all. Go's `initialize` sends `hooks` and nothing else.
 
 ---
 
-## §3. Missing options
+## §3. Missing options  **[FIXED]**
 
 Go's `AgentOptions` has 42 fields. Below is everything in Python's `ClaudeAgentOptions` or TS's
 `Options` that has no Go equivalent.
@@ -286,7 +294,7 @@ Go's `AgentOptions` has 42 fields. Below is everything in Python's `ClaudeAgentO
 
 ---
 
-## §4. Missing client / control-protocol methods
+## §4. Missing client / control-protocol methods  **[FIXED]**
 
 Go's `Client` exposes 9 control methods. TS's `Query` exposes 26.
 
@@ -337,7 +345,7 @@ Go's `Client` exposes 9 control methods. TS's `Query` exposes 26.
 
 ---
 
-## §5. Missing hook events and hook I/O
+## §5. Missing hook events and hook I/O  **[FIXED]**
 
 ### 5.1 Events
 
@@ -396,7 +404,7 @@ most common "my callback never fires" support question.
 
 ---
 
-## §6. Missing message and block types
+## §6. Missing message and block types  **[FIXED]**
 
 ### 6.1 Content blocks
 
@@ -461,7 +469,7 @@ Missing `message_id`, `stop_reason`, `session_id`, `uuid`. `Error` is declared o
 
 ---
 
-## §7. Entirely missing subsystem: `SessionStore` + session management
+## §7. `SessionStore` + session management  **[FIXED]**
 
 This is the largest single feature gap — roughly 4,000 LOC in the Python SDK
 (`session_store.py`, `session_mutations.py`, `session_resume.py`, `session_summary.py`,
@@ -517,7 +525,7 @@ a `map[string]any`.
 
 ---
 
-## §8. MCP / tool gaps
+## §8. MCP / tool gaps  **[FIXED]**
 
 - **No typed tool schemas.** Python's `@tool` decorator accepts a `TypedDict` or `{"name": str}` dict
   and generates JSON Schema; TS's `tool()` takes a Zod shape and infers the handler's argument type.
@@ -536,7 +544,7 @@ a `map[string]any`.
 
 ---
 
-## §9. Robustness, lifecycle, and process-management gaps
+## §9. Robustness, lifecycle, and process-management gaps  **[FIXED]**
 
 ### 9.1 No pluggable `Transport`
 `internal/transport.Transport` is an internal interface. Both reference SDKs **export** `Transport`
@@ -626,21 +634,21 @@ least two look like guesses at an unpublished API:
 | Area | Go | Python 0.2.128 | TS 0.3.220 |
 |---|---|---|---|
 | Wire-format correctness | ✓ (was: 11 divergences) | ✓ | ✓ |
-| Always-streaming transport | ✗ (`Query()` uses `--print`) | ✓ | ✓ |
-| `initialize` payload fields | 1 (`hooks`) | 5 | 17 |
-| Options | 42 (4 non-functional) | 48 | ~70 |
-| Control methods | 9 (3 broken) | 11 | 26 |
-| Hook events | 10 | 10 | 31 |
-| Hook-specific outputs | 3 | 8 | ~20 |
-| Content-block types | 4 | 6 | 6 |
-| Typed message types | 7 | 13 | 40+ |
-| `ResultMessage` fields | 11 | 18 | 25+ |
-| `SessionStore` | ✗ | ✓ | ✓ |
-| Session functions | 5 (paths broken) | 19 | 12 |
-| Pluggable transport | ✗ | ✓ | ✓ |
-| Typed MCP tool schemas | ✗ | ✓ | ✓ |
-| Graceful subprocess teardown | ✗ | ✓ | ✓ |
-| Orphan reaping | ✗ | ✓ | ✓ |
+| Always-streaming transport | ✓ | ✓ | ✓ |
+| `initialize` payload fields | 15 | 5 | 17 |
+| Options | ~70 | 48 | ~70 |
+| Control methods | 28 | 11 | 26 |
+| Hook events | 31 | 10 | 31 |
+| Hook-specific outputs | ~20 | 8 | ~20 |
+| Content-block types | 6 | 6 | 6 |
+| Typed message types | 20 | 13 | 40+ |
+| `ResultMessage` fields | 18 | 18 | 25+ |
+| `SessionStore` | ✓ | ✓ | ✓ |
+| Session functions | 17 | 19 | 12 |
+| Pluggable transport | ✓ | ✓ | ✓ |
+| Typed MCP tool schemas | ✓ | ✓ | ✓ |
+| Graceful subprocess teardown | ✓ | ✓ | ✓ |
+| Orphan reaping | ✓ | ✓ | ✓ |
 | Windows hardening | ✓ | ✓ | ✓ |
 
 ---
@@ -671,7 +679,7 @@ Fix everything in §1. Nothing else on this list matters while advertised featur
 *Tests:* golden-argv tests over `buildCommand()` for every option, and golden-JSON tests for every
 control request. This is the regression net the SDK currently lacks entirely.
 
-### Phase 2 — Transport & lifecycle (≈3 days)
+### Phase 2 — Transport & lifecycle — **DONE**
 
 13. **Make `Query()` streaming.** Drop `--print`; always `--input-format stream-json`; write the
     prompt as a user frame; run the same `protocol.Query` as `Client`. This unlocks hooks,
@@ -686,7 +694,7 @@ control request. This is the regression net the SDK currently lacks entirely.
 21. Env: `CLAUDE_AGENT_SDK_VERSION`, filter `CLAUDECODE`, OTel propagation, conditional stderr pipe.
 22. Export `Transport` as a public interface and accept injection on `Client`/`Query`.
 
-### Phase 3 — `initialize` handshake & option parity (≈3 days)
+### Phase 3 — `initialize` handshake & option parity — **DONE**
 
 23. Move `agents`, `systemPrompt`, `appendSystemPrompt` into `initialize` (keeping the flags as a
     fallback for older CLIs); add `title`, `skills`, `toolAliases`, `planModeInstructions`,
@@ -700,7 +708,7 @@ control request. This is the regression net the SDK currently lacks entirely.
 27. Typed `SDKControlInitializeResponse`; reimplement `SupportedAgents()` from it and **delete the
     output-scraping path in `agents.go`**.
 
-### Phase 4 — Types & messages (≈3 days)
+### Phase 4 — Types & messages — **DONE**
 
 28. `ServerToolUseBlock` / `ServerToolResultBlock` + `ServerToolName`.
 29. `ResultMessage`: `ModelUsage`, `PermissionDenials`, `DeferredToolUse`, `Errors`,
@@ -715,7 +723,7 @@ control request. This is the regression net the SDK currently lacks entirely.
 35. Fix `PostToolUseFailureHookInput.ToolInput` → `map[string]any`; add `ToolUseID`.
 36. Add `prompt_id` / `agent_id` / `agent_type` / `effort` to `BaseHookInput`.
 
-### Phase 5 — Control methods, hooks, MCP (≈4 days)
+### Phase 5 — Control methods, hooks, MCP — **DONE**
 
 37. Add the §4.2 control methods. Prioritize: `GetContextUsage`, `SupportedCommands`,
     `SupportedModels`, `SupportedAgents`, `AccountInfo`, `SetMaxThinkingTokens`, `ApplyFlagSettings`,
@@ -733,7 +741,7 @@ control request. This is the regression net the SDK currently lacks entirely.
     `ToolAnnotations`, and `resource_link`/`resource` content handling.
 43. Elicitation: `OnElicitation` option, request/result types, the two hook events.
 
-### Phase 6 — Sessions & `SessionStore` (≈5 days)
+### Phase 6 — Sessions & `SessionStore` — **DONE**
 
 44. Public `SessionStore` interface (`Append`/`Load` required; `ListSessions`,
     `ListSessionSummaries`, `Delete`, `ListSubkeys` optional via type assertion) + `SessionKey`,
@@ -774,5 +782,8 @@ Phases 5 and 6 are independent of each other and can run in parallel. Phase 2 is
 for everything after it, both because the streaming transport unblocks the `initialize` work and
 because the fake-transport harness it introduces is what makes the rest testable.
 
-**Rough total: ~20 working days** to reach Python parity, plus Phase 5's TS-only items for full
-TypeScript parity. Phase 1 is complete; ~18 days remain.
+All six phases are complete. What remains outside this plan is genuinely
+TypeScript-only surface that has no Go analogue or no CLI support to test
+against: the `Settings` object model (Go accepts settings as a JSON string),
+worktree/teammate hook payload structs beyond their event names, and the
+remaining `SDKMessage` variants that carry no fields a consumer acts on.

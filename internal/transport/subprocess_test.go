@@ -15,9 +15,8 @@ func newTestTransport(opts *SubprocessOptions) *SubprocessTransport {
 		opts = &SubprocessOptions{}
 	}
 	return &SubprocessTransport{
-		cliPath:     "/usr/bin/claude",
-		isStreaming: true,
-		options:     opts,
+		cliPath: "/usr/bin/claude",
+		options: opts,
 	}
 }
 
@@ -415,41 +414,70 @@ func TestBuildCommand_SdkBetas(t *testing.T) {
 	}
 }
 
+// A preset means "use the CLI's own system prompt", which is what the CLI does
+// when no flag is present. The preset's append and excludeDynamicSections
+// fields travel on the initialize request instead.
 func TestBuildCommand_SystemPromptPreset(t *testing.T) {
 	cmd := newTestTransport(&SubprocessOptions{
 		SystemPrompt: &types.SystemPromptPreset{Type: "preset", Preset: "claude_code"},
 	}).buildCommand()
-	got, ok := flagValue(cmd, "--system-prompt")
-	if !ok {
-		t.Fatalf("expected --system-prompt in argv: %v", argsAfter(cmd))
-	}
-	if !strings.Contains(got, "claude_code") {
-		t.Errorf("expected preset payload to name claude_code, got %q", got)
+
+	if hasFlag(cmd, "--system-prompt") {
+		t.Errorf("a preset must not emit --system-prompt: %v", argsAfter(cmd))
 	}
 }
 
-func TestBuildCommand_AgentDefinitionFields(t *testing.T) {
-	memory := "project"
+// With no system prompt configured the CLI's default must be blanked, so the
+// SDK behaves as a library rather than inheriting Claude Code's own prompt.
+func TestBuildCommand_SystemPromptDefaults(t *testing.T) {
+	cmd := newTestTransport(nil).buildCommand()
+	got, ok := flagValue(cmd, "--system-prompt")
+	if !ok || got != "" {
+		t.Errorf("--system-prompt = %q (present=%v), want empty", got, ok)
+	}
+}
+
+func TestBuildCommand_SystemPromptFile(t *testing.T) {
+	cmd := newTestTransport(&SubprocessOptions{
+		SystemPrompt: &types.SystemPromptFile{Type: "file", Path: "/tmp/prompt.md"},
+	}).buildCommand()
+
+	if got, ok := flagValue(cmd, "--system-prompt-file"); !ok || got != "/tmp/prompt.md" {
+		t.Errorf("--system-prompt-file = %q (present=%v)", got, ok)
+	}
+}
+
+// The CLI is always driven in streaming mode; --print cannot carry the
+// control protocol.
+func TestBuildCommand_AlwaysStreaming(t *testing.T) {
+	cmd := newTestTransport(nil).buildCommand()
+
+	if got, ok := flagValue(cmd, "--input-format"); !ok || got != "stream-json" {
+		t.Errorf("--input-format = %q (present=%v), want stream-json", got, ok)
+	}
+	if hasFlag(cmd, "--print") {
+		t.Errorf("--print must never be emitted: %v", argsAfter(cmd))
+	}
+}
+
+// Agents are no longer a CLI flag: they travel on the initialize control
+// request, where the payload can be larger and several fields have no flag
+// equivalent. See TestInitializeCarriesAgents in the protocol package.
+func TestBuildCommand_AgentsAreNotAFlag(t *testing.T) {
+	memory := types.AgentMemoryProject
 	cmd := newTestTransport(&SubprocessOptions{
 		Agents: map[string]types.AgentDefinition{
 			"test-agent": {
 				Description: "Test agent",
 				Prompt:      "Do stuff",
-				Skills:      []string{"skill1", "skill2"},
+				Skills:      []string{"skill1"},
 				Memory:      &memory,
-				MCPServers:  []any{"server1"},
 			},
 		},
 	}).buildCommand()
 
-	got, ok := flagValue(cmd, "--agents")
-	if !ok {
-		t.Fatalf("expected --agents in argv: %v", argsAfter(cmd))
-	}
-	for _, key := range []string{"skills", "memory", "mcpServers"} {
-		if !strings.Contains(got, key) {
-			t.Errorf("expected %q in agents JSON, got %s", key, got)
-		}
+	if hasFlag(cmd, "--agents") {
+		t.Errorf("--agents must not be emitted: %v", argsAfter(cmd))
 	}
 }
 
