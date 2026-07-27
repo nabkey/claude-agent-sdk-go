@@ -12,10 +12,15 @@ go get github.com/nabkey/claude-agent-sdk-go
 
 - Go 1.24+
 
-**Note:** The Claude Code CLI is automatically bundled with the package or downloaded on first use—no separate installation required! The SDK will use the bundled CLI by default. If you prefer to use a system-wide installation or a specific version, you can:
+**Note:** The Claude Code CLI must be installed separately. The SDK looks for a
+`claude` binary on `PATH` and then in the usual install locations
+(`~/.npm-global/bin`, `/usr/local/bin`, `~/.local/bin`, `~/node_modules/.bin`,
+`~/.yarn/bin`, `~/.claude/local`).
 
-- Install Claude Code separately: `curl -fsSL https://claude.ai/install.sh | bash`
-- Specify a custom path: `claude.AgentOptions{CLIPath: claude.String("/path/to/claude")}`
+- Install Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`
+- Or specify a custom path: `claude.AgentOptions{CLIPath: claude.String("/path/to/claude")}`
+
+Minimum supported CLI version: **2.0.0**.
 
 ## Quick Start
 
@@ -56,6 +61,12 @@ func main() {
 ## Basic Usage: Query()
 
 `Query()` is a helper function for querying Claude Code. It returns a read-only channel of response messages. See [query.go](query.go).
+
+> **`Query()` runs the CLI in non-streaming (`--print`) mode.** The bidirectional
+> control protocol is unavailable there, so `Hooks`, `CanUseTool`, and in-process
+> SDK MCP servers are **ignored** by `Query()` — use [`Client`](#client) for those.
+> Aligning `Query()` with the reference SDKs (which always stream) is tracked in
+> [GAP_ANALYSIS.md](GAP_ANALYSIS.md) Phase 2.
 
 ```go
 // Simple query — returns <-chan any (messages or errors)
@@ -345,27 +356,36 @@ client.ToggleMCPServer(ctx, "my-server", false)
 Control Claude's reasoning behavior:
 
 ```go
-// Adaptive thinking — model decides when to think
+// Adaptive thinking — model decides when to think (Opus 4.6+)
 options := &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigAdaptive{Type: "adaptive"},
+	Thinking: types.NewThinkingAdaptive(),
 }
 
-// Enabled thinking with a token budget
+// Fixed thinking token budget (older models)
 options = &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigEnabled{
-		Type:         "enabled",
-		BudgetTokens: 10000,
-	},
+	Thinking: types.NewThinkingEnabled(10000),
 }
 
 // Disabled thinking
 options = &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigDisabled{Type: "disabled"},
+	Thinking: types.NewThinkingDisabled(),
 }
 
 // Effort level (low, medium, high, max)
 options = claude.DefaultAgentOptions().WithEffort(types.EffortLevelHigh)
 ```
+
+Set `Display` to control whether thinking text is returned. Opus 4.7+ defaults
+to `omitted` (signature only); request `summarized` to receive text:
+
+```go
+display := types.ThinkingDisplaySummarized
+options := &claude.AgentOptions{
+	Thinking: &types.ThinkingConfigAdaptive{Type: "adaptive", Display: &display},
+}
+```
+
+`Thinking` takes precedence over the deprecated `MaxThinkingTokens`.
 
 ## Beta Features
 
@@ -413,6 +433,43 @@ options = &claude.AgentOptions{
 		Preset: "claude_code",
 	},
 }
+```
+
+The `claude_code` tools preset selects the CLI's full default tool set. Pass an
+explicit `[]string` to select individual tools, or an empty `[]string{}` to
+disable all built-in tools.
+
+## Setting Sources
+
+`SettingSources` controls which filesystem settings the CLI loads:
+
+```go
+// Load user and project settings (project is required for CLAUDE.md)
+options := &claude.AgentOptions{
+	SettingSources: []types.SettingSource{
+		types.SettingSourceUser,
+		types.SettingSourceProject,
+	},
+}
+
+// SDK isolation mode: load no filesystem settings at all
+options = &claude.AgentOptions{
+	SettingSources: []types.SettingSource{},
+}
+```
+
+Leaving `SettingSources` nil loads **all** sources, matching the CLI default.
+Note the distinction: a nil slice omits the flag entirely, whereas an empty
+non-nil slice explicitly disables filesystem settings.
+
+## Per-Tool Configuration
+
+`ToolConfig` configures built-in tools. Today this covers the preview format
+for `AskUserQuestion` options — use HTML for web-based consumers:
+
+```go
+options := claude.DefaultAgentOptions().
+	WithAskUserQuestionPreviewFormat(types.PreviewFormatHTML)
 ```
 
 ## Session Management
@@ -466,10 +523,10 @@ See [types/](types/) for complete type definitions:
 - **Messages**: `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage`, `StreamEvent`, `RateLimitEvent`
 - **Task messages**: `TaskStartedMessage`, `TaskProgressMessage`, `TaskNotificationMessage`
 - **Content blocks**: `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `ToolResultBlock`
-- **Configuration**: `AgentOptions`, `AgentDefinition`, `ThinkingConfig`, `EffortLevel`, `SdkBeta`
+- **Configuration**: `AgentOptions`, `AgentDefinition`, `ThinkingConfig`, `ThinkingDisplay`, `EffortLevel`, `SdkBeta`, `ToolConfig`
 - **MCP**: `MCPServerConfig`, `McpStatusResponse`, `McpServerStatus`, `McpToolInfo`
 - **Hooks**: `HookInput`, `HookOutput`, `HookCallback`, `HookMatcher`
-- **Permissions**: `PermissionResult`, `PermissionUpdate`, `ToolPermissionContext`
+- **Permissions**: `PermissionResult`, `PermissionUpdate`, `PermissionUpdateFromMap`, `ToolPermissionContext`
 - **Sessions**: `SDKSessionInfo`, `SessionMessage`
 
 ## Error Handling

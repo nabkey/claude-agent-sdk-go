@@ -5,6 +5,12 @@
 **Reference — Python:** `claude-agent-sdk` **0.2.128** (~11.3k LOC)
 **Reference — TypeScript:** `@anthropic-ai/claude-agent-sdk` **0.3.220** (bundles Claude Code CLI 2.1.220; ~11.4k LOC of `.d.ts` alone)
 
+> **Status: Phase 1 is complete** (see §12). Every wire-protocol divergence in
+> §1 has been fixed and is covered by golden-argv / control-payload tests, and
+> the Windows hardening from the cross-cutting section has landed. §2–§11
+> describe the remaining gaps and are unchanged. Items below that are done are
+> marked **[FIXED]**.
+
 Method: both reference SDKs were downloaded and read in full — Python source (`types.py`, `client.py`,
 `_internal/{query,message_parser,transport/subprocess_cli,sessions,session_*}.py`), TypeScript type
 declarations (`sdk.d.ts`), and the TypeScript **runtime bundle** (`sdk.mjs`) to confirm the actual CLI
@@ -35,12 +41,12 @@ silent-failure bug** and is by far the highest value-per-hour work in this docum
 
 ---
 
-## §1. Wire-protocol divergences — silent failures
+## §1. Wire-protocol divergences — silent failures  **[ALL FIXED]**
 
 These are ordered by blast radius. Each was verified against the TypeScript runtime bundle
 (`sdk.mjs`) and/or the Python transport, not just type declarations.
 
-### 1.1 `Thinking` is serialized as JSON — the CLI expects a keyword
+### 1.1 `Thinking` is serialized as JSON — the CLI expects a keyword **[FIXED]**
 
 `internal/transport/subprocess.go:400`
 
@@ -65,12 +71,12 @@ is what controls whether thinking text is returned at all.
 **Impact:** `WithThinking(...)` is inert or errors out. `examples/thinking_config` demonstrates a
 broken feature.
 
-### 1.2 `--tools` preset is serialized as JSON — the CLI expects `default`
+### 1.2 `--tools` preset is serialized as JSON — the CLI expects `default` **[FIXED]**
 
 `internal/transport/subprocess.go:237`. TS: `H.push("--tools","default")`. Go emits
 `--tools {"type":"preset","preset":"claude_code"}`.
 
-### 1.3 `EnableFileCheckpointing` uses a flag that does not exist
+### 1.3 `EnableFileCheckpointing` uses a flag that does not exist **[FIXED]**
 
 Go emits `--enable-file-checkpointing` (`subprocess.go:409`). The string does not appear anywhere in
 the TS bundle. Both reference SDKs set an **environment variable**:
@@ -82,7 +88,7 @@ CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true
 **Impact:** checkpointing never turns on, so `Client.RewindFiles()` can never succeed. Depending on
 CLI version, an unknown flag may also abort startup.
 
-### 1.4 `ToolConfig` is a fabricated type on a fabricated flag
+### 1.4 `ToolConfig` is a fabricated type on a fabricated flag **[FIXED]**
 
 Go emits `--tool-config <json>` with a hand-rolled
 `ToolConfiguration{Enabled, MaxConcurrency, Timeout}`. Neither the flag nor those fields exist. The
@@ -94,13 +100,13 @@ type ToolConfig = { askUserQuestion?: { previewFormat?: 'markdown' | 'html' } }
 
 …and it is delivered as `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` in the subprocess env.
 
-### 1.5 `AgentProgressSummaries` uses a flag that does not exist
+### 1.5 `AgentProgressSummaries` uses a flag that does not exist **[FIXED]**
 
 Go emits `--agent-progress-summaries`. In both reference SDKs this is a field on the **`initialize`
 control request** (`agentProgressSummaries: boolean`), alongside `promptSuggestions` and
 `forwardSubagentText`.
 
-### 1.6 `GetMCPStatus` sends the wrong subtype and reads the wrong key
+### 1.6 `GetMCPStatus` sends the wrong subtype and reads the wrong key **[FIXED]**
 
 `internal/protocol/query.go:569,577`
 
@@ -113,14 +119,14 @@ Go also never populates `ServerInfo` or `Scope` even though the fields exist on 
 
 **Impact:** `GetMCPStatus()` errors, or returns an empty server list. `examples/mcp_status` is broken.
 
-### 1.7 `ReconnectMCPServer` / `ToggleMCPServer` use snake_case; the wire is camelCase
+### 1.7 `ReconnectMCPServer` / `ToggleMCPServer` use snake_case; the wire is camelCase **[FIXED]**
 
 `internal/protocol/query.go:626,635` send `"server_name"`. Python, TS `.d.ts`, and the TS bundle all
 send **`"serverName"`** for `mcp_reconnect` and `mcp_toggle`. (Note the inconsistency is real and
 deliberate on the CLI side — `stop_task` really is `task_id`, `rewind_files` really is
 `user_message_id`.)
 
-### 1.8 `TaskUsage` has the wrong shape
+### 1.8 `TaskUsage` has the wrong shape **[FIXED]**
 
 `types/types.go:318`
 
@@ -136,7 +142,7 @@ usage: { total_tokens: number; tool_uses: number; duration_ms: number }
 
 **Impact:** `TaskProgressMessage.Usage` is always the zero value.
 
-### 1.9 Session directory sanitization does not match the CLI
+### 1.9 Session directory sanitization does not match the CLI **[FIXED]**
 
 `sessions/sessions.go:155`. Go replaces only `filepath.Separator` with `-` and, past 200 chars,
 appends a SHA-256 prefix. The CLI (and both SDKs) replace **every non-alphanumeric character** with
@@ -155,7 +161,7 @@ hash disagrees (the reference SDKs do, because the CLI hashes with Bun's hash an
 `.`, `_`, space, or other punctuation — i.e. most real projects. `RenameSession`/`TagSession` return
 "session not found".
 
-### 1.10 Permission suggestions are decoded down to their `type` field
+### 1.10 Permission suggestions are decoded down to their `type` field **[FIXED]**
 
 `internal/protocol/query.go:365-374` and `parser.go` build
 `PermissionUpdate{Type: ...}` and **drop `rules`, `behavior`, `mode`, `directories`, `destination`**.
@@ -163,7 +169,7 @@ The documented pattern — surface an "always allow" affordance by echoing
 `ctx.Suggestions` back as `PermissionResultAllow.UpdatedPermissions` — therefore sends empty rule
 sets. Python has a `PermissionUpdate.from_dict()` inverse of `to_dict()`; Go has no inverse.
 
-### 1.11 `--resume` and dash-leading `extra_args` are injection-prone
+### 1.11 `--resume` and dash-leading `extra_args` are injection-prone **[FIXED]**
 
 Go emits `--resume <value>` as two argv tokens (`subprocess.go:287`). The CLI declares `--resume`
 with an *optional* value, so a dash-leading value is parsed as a separate flag rather than bound to
@@ -174,7 +180,7 @@ the same `=` form to any `extra_args` value starting with `-`. Session titles ar
 Related, also absent in Go: the Windows `.bat`/`.cmd` spawn refusal (CVE-2024-27980 class) and the
 cmd.exe metacharacter rejection for `resume`/`session_id`.
 
-### 1.12 Two smaller ones
+### 1.12 Two smaller ones **[FIXED]**
 
 - **`--setting-sources` is always emitted, even when unset** (`subprocess.go:378`), so the Go default
   is `--setting-sources ""` = *no filesystem settings at all*, whereas both reference SDKs omit the
@@ -619,7 +625,7 @@ least two look like guesses at an unpublished API:
 
 | Area | Go | Python 0.2.128 | TS 0.3.220 |
 |---|---|---|---|
-| Wire-format correctness | **11 known divergences** | ✓ | ✓ |
+| Wire-format correctness | ✓ (was: 11 divergences) | ✓ | ✓ |
 | Always-streaming transport | ✗ (`Query()` uses `--print`) | ✓ | ✓ |
 | `initialize` payload fields | 1 (`hooks`) | 5 | 17 |
 | Options | 42 (4 non-functional) | 48 | ~70 |
@@ -635,7 +641,7 @@ least two look like guesses at an unpublished API:
 | Typed MCP tool schemas | ✗ | ✓ | ✓ |
 | Graceful subprocess teardown | ✗ | ✓ | ✓ |
 | Orphan reaping | ✗ | ✓ | ✓ |
-| Windows hardening | ✗ | ✓ | ✓ |
+| Windows hardening | ✓ | ✓ | ✓ |
 
 ---
 
@@ -643,7 +649,7 @@ least two look like guesses at an unpublished API:
 
 Six phases. Phase 1 is disproportionately valuable and should not be deferred.
 
-### Phase 1 — Correctness (≈2 days) — **do this first**
+### Phase 1 — Correctness — **DONE**
 
 Fix everything in §1. Nothing else on this list matters while advertised features silently no-op.
 
@@ -749,13 +755,13 @@ control request. This is the regression net the SDK currently lacks entirely.
 ### Cross-cutting
 
 - **Windows hardening** (§1.11): `.bat`/`.cmd` spawn refusal + cmd.exe metacharacter rejection.
-  Fold into Phase 1 or 2 — small, and it is a real injection surface.
+  **Done** — landed with Phase 1.
 - **Testing.** The three existing test files cover option cloning, hook serialization, and message
   parsing. Add: golden-argv tests (Phase 1), a fake `Transport` + scripted-NDJSON harness (Phase 2 —
   this is what makes Phases 3–6 testable at all), and control-protocol round-trip tests.
 - **Version pinning.** Record which CLI version the SDK targets (TS pins `claudeCodeVersion:
   2.1.220`) and raise `minimumClaudeCodeVersion` from `2.0.0` accordingly.
-- **README.** Remove the bundled-CLI claim until §9.10 is implemented.
+- **README.** Remove the bundled-CLI claim until §9.10 is implemented. **Done.**
 
 ### Suggested ordering
 
@@ -769,4 +775,4 @@ for everything after it, both because the streaming transport unblocks the `init
 because the fake-transport harness it introduces is what makes the rest testable.
 
 **Rough total: ~20 working days** to reach Python parity, plus Phase 5's TS-only items for full
-TypeScript parity.
+TypeScript parity. Phase 1 is complete; ~18 days remain.
