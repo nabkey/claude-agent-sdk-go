@@ -15,7 +15,7 @@ func main() {
 
 	// Example 1: Adaptive thinking (model decides when to think)
 	adaptiveOpts := &claude.AgentOptions{
-		Thinking: &types.ThinkingConfigAdaptive{Type: "adaptive"},
+		Thinking: types.NewThinkingAdaptive(),
 		MaxTurns: claude.Int(1),
 	}
 
@@ -27,10 +27,7 @@ func main() {
 
 	// Example 2: Enabled thinking with budget
 	enabledOpts := &claude.AgentOptions{
-		Thinking: &types.ThinkingConfigEnabled{
-			Type:         "enabled",
-			BudgetTokens: 10000,
-		},
+		Thinking: types.NewThinkingEnabled(10000),
 		MaxTurns: claude.Int(1),
 	}
 
@@ -53,7 +50,7 @@ func main() {
 
 	// Example 4: Disabled thinking
 	disabledOpts := &claude.AgentOptions{
-		Thinking: &types.ThinkingConfigDisabled{Type: "disabled"},
+		Thinking: types.NewThinkingDisabled(),
 		MaxTurns: claude.Int(1),
 	}
 

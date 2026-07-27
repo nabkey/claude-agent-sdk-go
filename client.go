@@ -149,7 +149,6 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 		User:                     opts.User,
 		Hooks:                    opts.Hooks,
 		PersistSession:           opts.PersistSession,
-		AgentProgressSummaries:   opts.AgentProgressSummaries,
 		ToolConfig:               opts.ToolConfig,
 	}
 
@@ -187,8 +186,9 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 			}
 			return opts.CanUseTool(ctx, toolName, input, permCtx)
 		},
-		Hooks:         opts.Hooks,
-		SDKMCPServers: sdkServers,
+		Hooks:                  opts.Hooks,
+		SDKMCPServers:          sdkServers,
+		AgentProgressSummaries: opts.AgentProgressSummaries,
 	})
 
 	// Start reading messages

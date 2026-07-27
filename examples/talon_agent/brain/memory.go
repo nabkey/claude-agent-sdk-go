@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	memoryPath  = filepath.Join(agentDir, "MEMORY.md")
-	conversDir  = filepath.Join(agentDir, "conversations")
+	memoryPath = filepath.Join(agentDir, "MEMORY.md")
+	conversDir = filepath.Join(agentDir, "conversations")
 )
 
 func handleReadMemory(w http.ResponseWriter, r *http.Request) {

@@ -52,10 +52,10 @@ type Message interface {
 
 // UserMessage represents a user input message.
 type UserMessage struct {
-	Content         any                `json:"content"` // Can be string or []ContentBlock
-	ParentToolUseID *string            `json:"parent_tool_use_id,omitempty"`
-	UUID            *string            `json:"uuid,omitempty"`
-	ToolUseResult   map[string]any     `json:"tool_use_result,omitempty"`
+	Content         any            `json:"content"` // Can be string or []ContentBlock
+	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
+	UUID            *string        `json:"uuid,omitempty"`
+	ToolUseResult   map[string]any `json:"tool_use_result,omitempty"`
 }
 
 func (m *UserMessage) isMessage() {}
@@ -205,6 +205,77 @@ func (p *PermissionUpdate) ToMap() map[string]any {
 	return result
 }
 
+// PermissionUpdateFromMap reconstructs a PermissionUpdate from the control
+// protocol's wire format. It is the inverse of ToMap and is used to decode the
+// permission suggestions the CLI attaches to a can_use_tool request, so callers
+// can echo them back verbatim as PermissionResultAllow.UpdatedPermissions.
+func PermissionUpdateFromMap(data map[string]any) PermissionUpdate {
+	update := PermissionUpdate{}
+
+	if typeStr, ok := data["type"].(string); ok {
+		update.Type = PermissionUpdateType(typeStr)
+	}
+
+	if dest, ok := data["destination"].(string); ok {
+		d := PermissionUpdateDestination(dest)
+		update.Destination = &d
+	}
+
+	if behavior, ok := data["behavior"].(string); ok {
+		b := PermissionBehavior(behavior)
+		update.Behavior = &b
+	}
+
+	if mode, ok := data["mode"].(string); ok {
+		m := PermissionMode(mode)
+		update.Mode = &m
+	}
+
+	if rules, ok := data["rules"].([]any); ok {
+		update.Rules = make([]PermissionRuleValue, 0, len(rules))
+		for _, r := range rules {
+			rMap, ok := r.(map[string]any)
+			if !ok {
+				continue
+			}
+			rule := PermissionRuleValue{}
+			if name, ok := rMap["toolName"].(string); ok {
+				rule.ToolName = name
+			}
+			if content, ok := rMap["ruleContent"].(string); ok {
+				rule.RuleContent = &content
+			}
+			update.Rules = append(update.Rules, rule)
+		}
+	}
+
+	if dirs, ok := data["directories"].([]any); ok {
+		update.Directories = make([]string, 0, len(dirs))
+		for _, d := range dirs {
+			if s, ok := d.(string); ok {
+				update.Directories = append(update.Directories, s)
+			}
+		}
+	}
+
+	return update
+}
+
+// PermissionUpdatesFromAny decodes a slice of raw permission updates, skipping
+// entries that are not objects.
+func PermissionUpdatesFromAny(raw []any) []PermissionUpdate {
+	if len(raw) == 0 {
+		return nil
+	}
+	updates := make([]PermissionUpdate, 0, len(raw))
+	for _, item := range raw {
+		if m, ok := item.(map[string]any); ok {
+			updates = append(updates, PermissionUpdateFromMap(m))
+		}
+	}
+	return updates
+}
+
 // ToolPermissionContext provides context for tool permission callbacks.
 type ToolPermissionContext struct {
 	Signal      any                // Reserved for future abort signal support
@@ -232,14 +303,32 @@ type PermissionResultDeny struct {
 
 func (p *PermissionResultDeny) isPermissionResult() {}
 
-// ToolConfiguration defines fine-grained configuration for an individual tool.
-type ToolConfiguration struct {
-	// Enabled controls whether the tool is available.
-	Enabled *bool `json:"enabled,omitempty"`
-	// MaxConcurrency limits concurrent invocations.
-	MaxConcurrency *int `json:"max_concurrency,omitempty"`
-	// Timeout sets a timeout in seconds for tool execution.
-	Timeout *float64 `json:"timeout,omitempty"`
+// PreviewFormat is the content format for the `preview` field on AskUserQuestion
+// options. It controls what the model is instructed to emit and how the field is
+// described in the tool schema.
+type PreviewFormat string
+
+const (
+	// PreviewFormatMarkdown renders previews as Markdown/ASCII (CLI default).
+	PreviewFormatMarkdown PreviewFormat = "markdown"
+	// PreviewFormatHTML renders previews as self-contained HTML fragments,
+	// for web-based SDK consumers.
+	PreviewFormatHTML PreviewFormat = "html"
+)
+
+// AskUserQuestionConfig configures the built-in AskUserQuestion tool.
+type AskUserQuestionConfig struct {
+	// PreviewFormat selects the content format for question option previews.
+	// Defaults to markdown when unset.
+	PreviewFormat *PreviewFormat `json:"previewFormat,omitempty"`
+}
+
+// ToolConfig provides per-tool configuration for built-in tools.
+//
+// This is delivered to the CLI through the subprocess environment rather than
+// as a command-line flag.
+type ToolConfig struct {
+	AskUserQuestion *AskUserQuestionConfig `json:"askUserQuestion,omitempty"`
 }
 
 // AgentDefinition defines a custom agent configuration.
@@ -266,43 +355,86 @@ type ToolsPreset struct {
 	Preset string `json:"preset"` // "claude_code"
 }
 
+// ThinkingDisplay controls whether thinking text is returned summarized or omitted.
+// Opus 4.7+ defaults to "omitted" (signature-only); pass "summarized" to receive text.
+type ThinkingDisplay string
+
+const (
+	// ThinkingDisplaySummarized returns summarized thinking text.
+	ThinkingDisplaySummarized ThinkingDisplay = "summarized"
+	// ThinkingDisplayOmitted returns only thinking signatures, no text.
+	ThinkingDisplayOmitted ThinkingDisplay = "omitted"
+)
+
 // ThinkingConfig is the interface for thinking configuration types.
 type ThinkingConfig interface {
 	isThinkingConfig()
+	// ThinkingType returns the type discriminator for this config.
+	ThinkingType() string
+	// DisplayMode returns the thinking display mode, or nil if unset.
+	DisplayMode() *ThinkingDisplay
 }
 
-// ThinkingConfigAdaptive enables adaptive thinking.
+// ThinkingConfigAdaptive enables adaptive thinking, letting Claude decide when
+// and how much to think (Opus 4.6+).
 type ThinkingConfigAdaptive struct {
 	Type string `json:"type"` // "adaptive"
+	// Display controls whether thinking text is summarized or omitted.
+	Display *ThinkingDisplay `json:"display,omitempty"`
 }
 
-func (t *ThinkingConfigAdaptive) isThinkingConfig() {}
+func (t *ThinkingConfigAdaptive) isThinkingConfig()             {}
+func (t *ThinkingConfigAdaptive) ThinkingType() string          { return "adaptive" }
+func (t *ThinkingConfigAdaptive) DisplayMode() *ThinkingDisplay { return t.Display }
 
-// ThinkingConfigEnabled enables thinking with a specific token budget.
+// ThinkingConfigEnabled enables thinking with a fixed token budget (older models).
+// When BudgetTokens is nil the CLI falls back to adaptive thinking.
 type ThinkingConfigEnabled struct {
-	Type         string `json:"type"`          // "enabled"
-	BudgetTokens int    `json:"budget_tokens"`
+	Type string `json:"type"` // "enabled"
+	// BudgetTokens is the fixed thinking token budget. Nil means adaptive.
+	BudgetTokens *int `json:"budget_tokens,omitempty"`
+	// Display controls whether thinking text is summarized or omitted.
+	Display *ThinkingDisplay `json:"display,omitempty"`
 }
 
-func (t *ThinkingConfigEnabled) isThinkingConfig() {}
+func (t *ThinkingConfigEnabled) isThinkingConfig()             {}
+func (t *ThinkingConfigEnabled) ThinkingType() string          { return "enabled" }
+func (t *ThinkingConfigEnabled) DisplayMode() *ThinkingDisplay { return t.Display }
 
-// ThinkingConfigDisabled disables thinking.
+// ThinkingConfigDisabled disables extended thinking.
 type ThinkingConfigDisabled struct {
 	Type string `json:"type"` // "disabled"
 }
 
-func (t *ThinkingConfigDisabled) isThinkingConfig() {}
+func (t *ThinkingConfigDisabled) isThinkingConfig()             {}
+func (t *ThinkingConfigDisabled) ThinkingType() string          { return "disabled" }
+func (t *ThinkingConfigDisabled) DisplayMode() *ThinkingDisplay { return nil }
+
+// NewThinkingAdaptive returns an adaptive thinking config.
+func NewThinkingAdaptive() *ThinkingConfigAdaptive {
+	return &ThinkingConfigAdaptive{Type: "adaptive"}
+}
+
+// NewThinkingEnabled returns a thinking config with a fixed token budget.
+func NewThinkingEnabled(budgetTokens int) *ThinkingConfigEnabled {
+	return &ThinkingConfigEnabled{Type: "enabled", BudgetTokens: &budgetTokens}
+}
+
+// NewThinkingDisabled returns a disabled thinking config.
+func NewThinkingDisabled() *ThinkingConfigDisabled {
+	return &ThinkingConfigDisabled{Type: "disabled"}
+}
 
 // RateLimitInfo contains rate limit information.
 type RateLimitInfo struct {
-	Status                RateLimitStatus `json:"status"`
-	ResetsAt              *string         `json:"resets_at,omitempty"`
-	RateLimitType         *RateLimitType  `json:"rate_limit_type,omitempty"`
-	Utilization           *float64        `json:"utilization,omitempty"`
+	Status                RateLimitStatus  `json:"status"`
+	ResetsAt              *string          `json:"resets_at,omitempty"`
+	RateLimitType         *RateLimitType   `json:"rate_limit_type,omitempty"`
+	Utilization           *float64         `json:"utilization,omitempty"`
 	OverageStatus         *RateLimitStatus `json:"overage_status,omitempty"`
-	OverageResetsAt       *int64          `json:"overage_resets_at,omitempty"`
-	OverageDisabledReason *string         `json:"overage_disabled_reason,omitempty"`
-	Raw                   map[string]any  `json:"raw,omitempty"`
+	OverageResetsAt       *int64           `json:"overage_resets_at,omitempty"`
+	OverageDisabledReason *string          `json:"overage_disabled_reason,omitempty"`
+	Raw                   map[string]any   `json:"raw,omitempty"`
 }
 
 // RateLimitEvent represents a rate limit event message.
@@ -314,12 +446,15 @@ type RateLimitEvent struct {
 
 func (m *RateLimitEvent) isMessage() {}
 
-// TaskUsage contains token usage information for a task.
+// TaskUsage contains usage statistics reported in task_progress and
+// task_notification messages.
 type TaskUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	// TotalTokens is the cumulative token count for the task.
+	TotalTokens int `json:"total_tokens"`
+	// ToolUses is the number of tool invocations made by the task.
+	ToolUses int `json:"tool_uses"`
+	// DurationMS is the task's elapsed wall time in milliseconds.
+	DurationMS int `json:"duration_ms"`
 }
 
 // TaskStartedMessage represents a task started system message.

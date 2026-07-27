@@ -100,10 +100,9 @@ func TestParseTaskProgressMessage(t *testing.T) {
 		"tool_use_id":    "tool-prog",
 		"last_tool_name": "Bash",
 		"usage": map[string]any{
-			"input_tokens":                float64(100),
-			"output_tokens":               float64(50),
-			"cache_creation_input_tokens": float64(10),
-			"cache_read_input_tokens":     float64(5),
+			"total_tokens": float64(150),
+			"tool_uses":    float64(3),
+			"duration_ms":  float64(1200),
 		},
 	}
 
@@ -132,11 +131,14 @@ func TestParseTaskProgressMessage(t *testing.T) {
 	if tpm.LastToolName == nil || *tpm.LastToolName != "Bash" {
 		t.Errorf("expected last_tool_name Bash, got %v", tpm.LastToolName)
 	}
-	if tpm.Usage.InputTokens != 100 {
-		t.Errorf("expected input_tokens 100, got %d", tpm.Usage.InputTokens)
+	if tpm.Usage.TotalTokens != 150 {
+		t.Errorf("expected total_tokens 150, got %d", tpm.Usage.TotalTokens)
 	}
-	if tpm.Usage.OutputTokens != 50 {
-		t.Errorf("expected output_tokens 50, got %d", tpm.Usage.OutputTokens)
+	if tpm.Usage.ToolUses != 3 {
+		t.Errorf("expected tool_uses 3, got %d", tpm.Usage.ToolUses)
+	}
+	if tpm.Usage.DurationMS != 1200 {
+		t.Errorf("expected duration_ms 1200, got %d", tpm.Usage.DurationMS)
 	}
 }
 
@@ -152,10 +154,9 @@ func TestParseTaskNotificationMessage(t *testing.T) {
 		"session_id":  "session-notif",
 		"tool_use_id": "tool-456",
 		"usage": map[string]any{
-			"input_tokens":                float64(200),
-			"output_tokens":               float64(100),
-			"cache_creation_input_tokens": float64(20),
-			"cache_read_input_tokens":     float64(10),
+			"total_tokens": float64(300),
+			"tool_uses":    float64(7),
+			"duration_ms":  float64(4500),
 		},
 	}
 
@@ -193,8 +194,14 @@ func TestParseTaskNotificationMessage(t *testing.T) {
 	if tnm.Usage == nil {
 		t.Fatal("expected usage to be set")
 	}
-	if tnm.Usage.InputTokens != 200 {
-		t.Errorf("expected input_tokens 200, got %d", tnm.Usage.InputTokens)
+	if tnm.Usage.TotalTokens != 300 {
+		t.Errorf("expected total_tokens 300, got %d", tnm.Usage.TotalTokens)
+	}
+	if tnm.Usage.ToolUses != 7 {
+		t.Errorf("expected tool_uses 7, got %d", tnm.Usage.ToolUses)
+	}
+	if tnm.Usage.DurationMS != 4500 {
+		t.Errorf("expected duration_ms 4500, got %d", tnm.Usage.DurationMS)
 	}
 }
 

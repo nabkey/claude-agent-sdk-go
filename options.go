@@ -141,9 +141,9 @@ type AgentOptions struct {
 	// AgentProgressSummaries enables AI-generated progress summaries for subagents.
 	AgentProgressSummaries bool
 
-	// ToolConfig provides fine-grained per-tool configuration.
-	// Keys are tool names (e.g., "Bash", "Write").
-	ToolConfig map[string]types.ToolConfiguration
+	// ToolConfig provides per-tool configuration for built-in tools.
+	// Delivered to the CLI through the subprocess environment.
+	ToolConfig *types.ToolConfig
 }
 
 // effortToString converts an EffortLevel pointer to a string pointer for transport.
@@ -295,12 +295,22 @@ func (o *AgentOptions) WithAgentProgressSummaries() *AgentOptions {
 	return o
 }
 
-// WithToolConfig sets configuration for a specific tool.
-func (o *AgentOptions) WithToolConfig(name string, config types.ToolConfiguration) *AgentOptions {
+// WithToolConfig sets per-tool configuration for built-in tools.
+func (o *AgentOptions) WithToolConfig(config types.ToolConfig) *AgentOptions {
+	o.ToolConfig = &config
+	return o
+}
+
+// WithAskUserQuestionPreviewFormat sets the content format for AskUserQuestion
+// option previews. Use types.PreviewFormatHTML for web-based consumers.
+func (o *AgentOptions) WithAskUserQuestionPreviewFormat(format types.PreviewFormat) *AgentOptions {
 	if o.ToolConfig == nil {
-		o.ToolConfig = make(map[string]types.ToolConfiguration)
+		o.ToolConfig = &types.ToolConfig{}
 	}
-	o.ToolConfig[name] = config
+	if o.ToolConfig.AskUserQuestion == nil {
+		o.ToolConfig.AskUserQuestion = &types.AskUserQuestionConfig{}
+	}
+	o.ToolConfig.AskUserQuestion.PreviewFormat = &format
 	return o
 }
 
@@ -435,10 +445,12 @@ func (o *AgentOptions) Clone() *AgentOptions {
 	}
 
 	if o.ToolConfig != nil {
-		clone.ToolConfig = make(map[string]types.ToolConfiguration)
-		for k, v := range o.ToolConfig {
-			clone.ToolConfig[k] = v
+		tc := *o.ToolConfig
+		if o.ToolConfig.AskUserQuestion != nil {
+			aq := *o.ToolConfig.AskUserQuestion
+			tc.AskUserQuestion = &aq
 		}
+		clone.ToolConfig = &tc
 	}
 
 	return clone

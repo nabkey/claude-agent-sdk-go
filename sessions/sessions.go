@@ -4,7 +4,6 @@ package sessions
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,14 +23,11 @@ func ListSessions(directory *string) ([]types.SDKSessionInfo, error) {
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
-	projectDir := getProjectDir(absDir)
-	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
-		return nil, nil // No sessions directory
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return nil, nil // No sessions directory for this project
 	}
 
 	entries, err := os.ReadDir(projectDir)
@@ -76,12 +72,12 @@ func GetSessionInfo(sessionID string, directory *string) (*types.SDKSessionInfo,
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
-	projectDir := getProjectDir(absDir)
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -99,12 +95,12 @@ func GetSessionMessages(sessionID string, directory *string) ([]types.SessionMes
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
-	projectDir := getProjectDir(absDir)
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 
 	file, err := os.Open(filePath)
@@ -142,29 +138,6 @@ func GetSessionMessages(sessionID string, directory *string) ([]types.SessionMes
 	}
 
 	return messages, nil
-}
-
-// getProjectDir returns the path to the Claude sessions directory for a given working directory.
-func getProjectDir(absDir string) string {
-	homeDir, _ := os.UserHomeDir()
-	sanitized := sanitizePath(absDir)
-	return filepath.Join(homeDir, ".claude", "projects", sanitized)
-}
-
-// sanitizePath converts a directory path to a sanitized form used by Claude Code.
-func sanitizePath(dir string) string {
-	// Replace path separators with hyphens
-	sanitized := strings.ReplaceAll(dir, string(filepath.Separator), "-")
-	// Remove leading hyphen
-	sanitized = strings.TrimPrefix(sanitized, "-")
-
-	// If the path is too long, use a hash
-	if len(sanitized) > 200 {
-		hash := sha256.Sum256([]byte(dir))
-		sanitized = fmt.Sprintf("%x", hash[:16])
-	}
-
-	return sanitized
 }
 
 // parseSessionFile reads a JSONL session file and extracts session info.

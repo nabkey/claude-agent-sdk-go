@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -97,7 +97,7 @@ type SubprocessOptions struct {
 	// MaxThinkingTokens limits thinking tokens.
 	MaxThinkingTokens *int
 	// Thinking configures thinking behavior.
-	Thinking any
+	Thinking types.ThinkingConfig
 	// Effort sets effort level.
 	Effort *string
 	// OutputFormat configures structured output.
@@ -124,16 +124,19 @@ type SubprocessOptions struct {
 	Hooks map[types.HookEvent][]types.HookMatcher
 	// PersistSession controls whether sessions are saved to disk.
 	PersistSession *bool
-	// AgentProgressSummaries enables progress summaries for subagents.
-	AgentProgressSummaries bool
-	// ToolConfig provides per-tool configuration.
-	ToolConfig map[string]types.ToolConfiguration
+	// ToolConfig provides per-tool configuration. Delivered via the
+	// subprocess environment, not as a CLI flag.
+	ToolConfig *types.ToolConfig
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
 func NewSubprocessTransport(prompt string, isStreaming bool, opts *SubprocessOptions) (*SubprocessTransport, error) {
 	if opts == nil {
 		opts = &SubprocessOptions{}
+	}
+
+	if err := validateOptions(opts); err != nil {
+		return nil, err
 	}
 
 	cliPath := ""
@@ -145,6 +148,11 @@ func NewSubprocessTransport(prompt string, isStreaming bool, opts *SubprocessOpt
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Validate the resolved CLI before anything is spawned with it.
+	if err := rejectWindowsBatchCLI(cliPath); err != nil {
+		return nil, err
 	}
 
 	cwd := ""
@@ -202,6 +210,20 @@ func findCLI() (string, error) {
 	)
 }
 
+// appendFlagValue appends a --flag/value pair, using the `--flag=value` form
+// when the value begins with a dash.
+//
+// Several CLI options are declared with an *optional* value. In the two-token
+// form a dash-leading value is not bound to its flag and is instead parsed as a
+// separate flag, letting an untrusted value inject arbitrary CLI flags. The
+// equals form always binds the value to the flag.
+func appendFlagValue(cmd []string, flag, value string) []string {
+	if len(value) > 1 && strings.HasPrefix(value, "-") {
+		return append(cmd, fmt.Sprintf("--%s=%s", flag, value))
+	}
+	return append(cmd, fmt.Sprintf("--%s", flag), value)
+}
+
 // buildCommand constructs the CLI command with arguments.
 func (t *SubprocessTransport) buildCommand() []string {
 	cmd := []string{t.cliPath, "--output-format", "stream-json", "--verbose"}
@@ -226,17 +248,17 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--append-system-prompt", *opts.AppendSystemPrompt)
 	}
 
-	// Tools
-	switch t := opts.Tools.(type) {
+	// Tools. A preset maps to the literal "default"; the CLI does not accept
+	// a JSON-encoded preset object here.
+	switch tools := opts.Tools.(type) {
 	case []string:
-		if len(t) == 0 {
+		if len(tools) == 0 {
 			cmd = append(cmd, "--tools", "")
 		} else {
-			cmd = append(cmd, "--tools", strings.Join(t, ","))
+			cmd = append(cmd, "--tools", strings.Join(tools, ","))
 		}
 	case *types.ToolsPreset:
-		toolsJSON, _ := json.Marshal(t)
-		cmd = append(cmd, "--tools", string(toolsJSON))
+		cmd = append(cmd, "--tools", "default")
 	}
 
 	if len(opts.AllowedTools) > 0 {
@@ -283,8 +305,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--continue")
 	}
 
+	// Bind with `=` so a dash-leading session title cannot inject CLI flags:
+	// --resume takes an optional value, so the two-token form would not bind.
 	if opts.Resume != nil {
-		cmd = append(cmd, "--resume", *opts.Resume)
+		cmd = append(cmd, fmt.Sprintf("--resume=%s", *opts.Resume))
 	}
 
 	// Settings and sandbox handling
@@ -366,16 +390,17 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--agents", string(agentsJSON))
 	}
 
-	// Setting sources
-	sourcesValue := ""
+	// Setting sources. Only emitted when explicitly configured: omitting the
+	// flag lets the CLI load all sources (its default), whereas passing an
+	// empty value disables filesystem settings entirely. A nil slice must
+	// therefore not produce a flag, while an empty non-nil slice must.
 	if opts.SettingSources != nil {
 		sources := make([]string, len(opts.SettingSources))
 		for i, s := range opts.SettingSources {
 			sources[i] = string(s)
 		}
-		sourcesValue = strings.Join(sources, ",")
+		cmd = append(cmd, fmt.Sprintf("--setting-sources=%s", strings.Join(sources, ",")))
 	}
-	cmd = append(cmd, "--setting-sources", sourcesValue)
 
 	// Plugins
 	for _, plugin := range opts.Plugins {
@@ -384,31 +409,57 @@ func (t *SubprocessTransport) buildCommand() []string {
 		}
 	}
 
-	// Extra args
-	for flag, value := range opts.ExtraArgs {
+	// Extra args. Sort for deterministic argv ordering across runs.
+	extraFlags := make([]string, 0, len(opts.ExtraArgs))
+	for flag := range opts.ExtraArgs {
+		extraFlags = append(extraFlags, flag)
+	}
+	sort.Strings(extraFlags)
+	for _, flag := range extraFlags {
+		value := opts.ExtraArgs[flag]
 		if value == nil {
 			cmd = append(cmd, fmt.Sprintf("--%s", flag))
 		} else {
-			cmd = append(cmd, fmt.Sprintf("--%s", flag), *value)
+			cmd = appendFlagValue(cmd, flag, *value)
 		}
 	}
 
-	if opts.MaxThinkingTokens != nil {
-		cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *opts.MaxThinkingTokens))
-	}
-
+	// Thinking configuration. `Thinking` takes precedence over the deprecated
+	// `MaxThinkingTokens`. The CLI models this as two separate flags rather
+	// than a single JSON payload:
+	//
+	//   adaptive              -> --thinking adaptive
+	//   enabled w/ budget     -> --max-thinking-tokens N
+	//   enabled w/o budget    -> --thinking adaptive
+	//   disabled              -> --thinking disabled
 	if opts.Thinking != nil {
-		thinkingJSON, _ := json.Marshal(opts.Thinking)
-		cmd = append(cmd, "--thinking", string(thinkingJSON))
+		switch cfg := opts.Thinking.(type) {
+		case *types.ThinkingConfigAdaptive:
+			cmd = append(cmd, "--thinking", "adaptive")
+		case *types.ThinkingConfigEnabled:
+			if cfg.BudgetTokens != nil {
+				cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *cfg.BudgetTokens))
+			} else {
+				cmd = append(cmd, "--thinking", "adaptive")
+			}
+		case *types.ThinkingConfigDisabled:
+			cmd = append(cmd, "--thinking", "disabled")
+		}
+		if display := opts.Thinking.DisplayMode(); display != nil {
+			cmd = append(cmd, "--thinking-display", string(*display))
+		}
+	} else if opts.MaxThinkingTokens != nil {
+		cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *opts.MaxThinkingTokens))
 	}
 
 	if opts.Effort != nil {
 		cmd = append(cmd, "--effort", *opts.Effort)
 	}
 
-	if opts.EnableFileCheckpointing {
-		cmd = append(cmd, "--enable-file-checkpointing")
-	}
+	// Note: file checkpointing, per-tool config, and agent progress summaries
+	// are NOT CLI flags. Checkpointing and tool config are delivered through
+	// the subprocess environment (see buildEnv); agent progress summaries are
+	// sent as a field on the initialize control request.
 
 	// MCPConfigPath is only used when MCPServers is not set
 	if opts.MCPConfigPath != nil && len(opts.MCPServers) == 0 {
@@ -417,15 +468,6 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.PersistSession != nil && !*opts.PersistSession {
 		cmd = append(cmd, "--no-session-persistence")
-	}
-
-	if opts.AgentProgressSummaries {
-		cmd = append(cmd, "--agent-progress-summaries")
-	}
-
-	if len(opts.ToolConfig) > 0 {
-		tcJSON, _ := json.Marshal(opts.ToolConfig)
-		cmd = append(cmd, "--tool-config", string(tcJSON))
 	}
 
 	// Output format / JSON schema
@@ -486,6 +528,60 @@ func (t *SubprocessTransport) buildSettingsValue() string {
 	return string(result)
 }
 
+// buildEnv assembles the subprocess environment.
+//
+// Several options are configured through the environment rather than through
+// CLI flags: file checkpointing and the AskUserQuestion preview format have no
+// corresponding flag on the CLI.
+//
+// Precedence, lowest to highest: the inherited process environment, the SDK's
+// default entrypoint marker, caller-supplied Env, then SDK-controlled values
+// that must not be overridden.
+func (t *SubprocessTransport) buildEnv() []string {
+	opts := t.options
+
+	env := make(map[string]string, len(os.Environ())+8)
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+
+	// Default entrypoint marker; callers may override it via Env.
+	env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-go"
+
+	for k, v := range opts.Env {
+		env[k] = v
+	}
+
+	// SDK-controlled values. These are applied after caller Env so the
+	// transport's own configuration cannot be silently disabled.
+	if opts.EnableFileCheckpointing {
+		env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "true"
+	}
+	if opts.ToolConfig != nil &&
+		opts.ToolConfig.AskUserQuestion != nil &&
+		opts.ToolConfig.AskUserQuestion.PreviewFormat != nil {
+		env["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] = string(*opts.ToolConfig.AskUserQuestion.PreviewFormat)
+	}
+	if t.cwd != "" {
+		env["PWD"] = t.cwd
+	}
+
+	// Flatten deterministically so argv/env dumps are stable across runs.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	result := make([]string, 0, len(keys))
+	for _, k := range keys {
+		result = append(result, k+"="+env[k])
+	}
+	return result
+}
+
 // Connect starts the subprocess and prepares for communication.
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	t.closeMu.Lock()
@@ -503,18 +599,7 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	cmdArgs := t.buildCommand()
 	t.cmd = exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 
-	// Set up environment
-	env := os.Environ()
-	if t.options.Env != nil {
-		for k, v := range t.options.Env {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	if t.cwd != "" {
-		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
-	}
-	t.cmd.Env = env
+	t.cmd.Env = t.buildEnv()
 
 	if t.cwd != "" {
 		t.cmd.Dir = t.cwd
@@ -814,6 +899,3 @@ func compareVersions(a, b string) int {
 	}
 	return 0
 }
-
-// Ensure unused imports are used (for runtime)
-var _ = runtime.GOOS

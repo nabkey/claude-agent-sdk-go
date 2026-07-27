@@ -301,17 +301,14 @@ func getFloat64Any(data map[string]any, keys ...string) (float64, bool) {
 // parseTaskUsage extracts TaskUsage from a map.
 func parseTaskUsage(data map[string]any) types.TaskUsage {
 	var usage types.TaskUsage
-	if v, ok := data["input_tokens"].(float64); ok {
-		usage.InputTokens = int(v)
+	if v, ok := data["total_tokens"].(float64); ok {
+		usage.TotalTokens = int(v)
 	}
-	if v, ok := data["output_tokens"].(float64); ok {
-		usage.OutputTokens = int(v)
+	if v, ok := data["tool_uses"].(float64); ok {
+		usage.ToolUses = int(v)
 	}
-	if v, ok := data["cache_creation_input_tokens"].(float64); ok {
-		usage.CacheCreationInputTokens = int(v)
-	}
-	if v, ok := data["cache_read_input_tokens"].(float64); ok {
-		usage.CacheReadInputTokens = int(v)
+	if v, ok := data["duration_ms"].(float64); ok {
+		usage.DurationMS = int(v)
 	}
 	return usage
 }

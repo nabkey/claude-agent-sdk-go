@@ -77,8 +77,8 @@ type StdioChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *StdioChannelServer) isChannelServerConfig()        {}
-func (s *StdioChannelServer) ChannelServerType() string     { return "stdio" }
+func (s *StdioChannelServer) isChannelServerConfig()    {}
+func (s *StdioChannelServer) ChannelServerType() string { return "stdio" }
 
 // SSEChannelServer represents a channel server that communicates via Server-Sent Events.
 type SSEChannelServer struct {
@@ -88,8 +88,8 @@ type SSEChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *SSEChannelServer) isChannelServerConfig()        {}
-func (s *SSEChannelServer) ChannelServerType() string     { return "sse" }
+func (s *SSEChannelServer) isChannelServerConfig()    {}
+func (s *SSEChannelServer) ChannelServerType() string { return "sse" }
 
 // HTTPChannelServer represents a channel server that communicates via HTTP.
 type HTTPChannelServer struct {
@@ -99,8 +99,8 @@ type HTTPChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *HTTPChannelServer) isChannelServerConfig()        {}
-func (s *HTTPChannelServer) ChannelServerType() string     { return "http" }
+func (s *HTTPChannelServer) isChannelServerConfig()    {}
+func (s *HTTPChannelServer) ChannelServerType() string { return "http" }
 
 // WebSocketChannelServer represents a channel server that communicates via WebSocket.
 type WebSocketChannelServer struct {
@@ -110,8 +110,8 @@ type WebSocketChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *WebSocketChannelServer) isChannelServerConfig()        {}
-func (s *WebSocketChannelServer) ChannelServerType() string     { return "ws" }
+func (s *WebSocketChannelServer) isChannelServerConfig()    {}
+func (s *WebSocketChannelServer) ChannelServerType() string { return "ws" }
 
 // SandboxNetworkConfig defines network configuration for sandbox.
 type SandboxNetworkConfig struct {

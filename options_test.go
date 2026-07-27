@@ -85,7 +85,7 @@ func TestClone_SystemPromptPreset(t *testing.T) {
 
 func TestBuilderMethods(t *testing.T) {
 	opts := DefaultAgentOptions().
-		WithThinking(&types.ThinkingConfigEnabled{Type: "enabled", BudgetTokens: 5000}).
+		WithThinking(types.NewThinkingEnabled(5000)).
 		WithEffort(types.EffortLevelMax).
 		WithFileCheckpointing().
 		WithMCPConfigPath("/path/to/config")

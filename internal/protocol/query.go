@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,10 @@ type Query struct {
 	hooks             map[types.HookEvent][]HookMatcherInternal
 	sdkMCPServers     map[string]*MCPServerHandler
 	initializeTimeout time.Duration
+
+	// agentProgressSummaries is sent as a field on the initialize request.
+	// There is no corresponding CLI flag.
+	agentProgressSummaries bool
 
 	// Control protocol state
 	pendingResponses map[string]chan *ControlResult
@@ -95,6 +100,10 @@ type QueryOptions struct {
 	Hooks             map[types.HookEvent][]types.HookMatcher
 	SDKMCPServers     map[string]*MCPServerHandler
 	InitializeTimeout time.Duration
+
+	// AgentProgressSummaries enables AI-generated progress summaries for
+	// subagents. Sent on the initialize request; there is no CLI flag.
+	AgentProgressSummaries bool
 }
 
 // NewQuery creates a new Query instance.
@@ -106,19 +115,20 @@ func NewQuery(opts *QueryOptions) *Query {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	q := &Query{
-		transport:          opts.Transport,
-		isStreamingMode:    opts.IsStreamingMode,
-		canUseTool:         opts.CanUseTool,
-		sdkMCPServers:      opts.SDKMCPServers,
-		initializeTimeout:  opts.InitializeTimeout,
-		pendingResponses:   make(map[string]chan *ControlResult),
-		hookCallbacks:      make(map[string]types.HookCallback),
-		messageChan:        make(chan map[string]any, 100),
-		errorChan:          make(chan error, 1),
-		firstResultEvent:   make(chan struct{}),
-		streamCloseTimeout: 60 * time.Second,
-		ctx:                ctx,
-		cancel:             cancel,
+		transport:              opts.Transport,
+		isStreamingMode:        opts.IsStreamingMode,
+		canUseTool:             opts.CanUseTool,
+		sdkMCPServers:          opts.SDKMCPServers,
+		initializeTimeout:      opts.InitializeTimeout,
+		agentProgressSummaries: opts.AgentProgressSummaries,
+		pendingResponses:       make(map[string]chan *ControlResult),
+		hookCallbacks:          make(map[string]types.HookCallback),
+		messageChan:            make(chan map[string]any, 100),
+		errorChan:              make(chan error, 1),
+		firstResultEvent:       make(chan struct{}),
+		streamCloseTimeout:     60 * time.Second,
+		ctx:                    ctx,
+		cancel:                 cancel,
 	}
 
 	// Convert hooks to internal format and register callbacks
@@ -183,6 +193,17 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 	}
 	if hooksConfig != nil {
 		request["hooks"] = hooksConfig
+	}
+	if q.agentProgressSummaries {
+		request["agentProgressSummaries"] = true
+	}
+	if len(q.sdkMCPServers) > 0 {
+		names := make([]string, 0, len(q.sdkMCPServers))
+		for name := range q.sdkMCPServers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		request["sdkMcpServers"] = names
 	}
 
 	initCtx, cancel := context.WithTimeout(ctx, q.initializeTimeout)
@@ -358,19 +379,13 @@ func (q *Query) handleToolPermission(ctx context.Context, request map[string]any
 	input, _ := request["input"].(map[string]any)
 	suggestions, _ := request["permission_suggestions"].([]any)
 
+	// Decode suggestions in full. Callers are expected to echo these back as
+	// PermissionResultAllow.UpdatedPermissions to implement "always allow",
+	// so dropping the rules/behavior/mode/directories payload would silently
+	// turn that into a no-op.
 	permCtx := types.ToolPermissionContext{
-		Signal: nil,
-	}
-	// Convert suggestions to PermissionUpdate slice
-	for _, s := range suggestions {
-		if sMap, ok := s.(map[string]any); ok {
-			if typeStr, ok := sMap["type"].(string); ok {
-				update := types.PermissionUpdate{
-					Type: types.PermissionUpdateType(typeStr),
-				}
-				permCtx.Suggestions = append(permCtx.Suggestions, update)
-			}
-		}
+		Signal:      nil,
+		Suggestions: types.PermissionUpdatesFromAny(suggestions),
 	}
 
 	result, err := q.canUseTool(ctx, toolName, input, permCtx)
@@ -567,14 +582,14 @@ func (q *Query) RewindFiles(ctx context.Context, userMessageID string) error {
 // GetMCPStatus retrieves the status of all MCP servers.
 func (q *Query) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, error) {
 	response, err := q.sendControlRequest(ctx, map[string]any{
-		"subtype": "get_mcp_status",
+		"subtype": "mcp_status",
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	result := &types.McpStatusResponse{}
-	if servers, ok := response["servers"].([]any); ok {
+	if servers, ok := response["mcpServers"].([]any); ok {
 		for _, s := range servers {
 			if sMap, ok := s.(map[string]any); ok {
 				server := types.McpServerStatus{
@@ -586,6 +601,15 @@ func (q *Query) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, err
 				}
 				if config, ok := sMap["config"].(map[string]any); ok {
 					server.Config = config
+				}
+				if scope, ok := sMap["scope"].(string); ok {
+					server.Scope = &scope
+				}
+				if info, ok := sMap["serverInfo"].(map[string]any); ok {
+					server.ServerInfo = &types.McpServerInfo{
+						Name:    getString(info, "name"),
+						Version: getString(info, "version"),
+					}
 				}
 				if tools, ok := sMap["tools"].([]any); ok {
 					for _, t := range tools {
@@ -621,10 +645,13 @@ func (q *Query) GetMCPStatus(ctx context.Context) (*types.McpStatusResponse, err
 }
 
 // ReconnectMCPServer sends a request to reconnect a specific MCP server.
+//
+// Note the wire protocol uses camelCase `serverName` for the MCP control
+// requests, unlike `stop_task` (task_id) and `rewind_files` (user_message_id).
 func (q *Query) ReconnectMCPServer(ctx context.Context, serverName string) error {
 	_, err := q.sendControlRequest(ctx, map[string]any{
-		"subtype":     "mcp_reconnect",
-		"server_name": serverName,
+		"subtype":    "mcp_reconnect",
+		"serverName": serverName,
 	})
 	return err
 }
@@ -632,9 +659,9 @@ func (q *Query) ReconnectMCPServer(ctx context.Context, serverName string) error
 // ToggleMCPServer sends a request to enable or disable a specific MCP server.
 func (q *Query) ToggleMCPServer(ctx context.Context, serverName string, enabled bool) error {
 	_, err := q.sendControlRequest(ctx, map[string]any{
-		"subtype":     "mcp_toggle",
-		"server_name": serverName,
-		"enabled":     enabled,
+		"subtype":    "mcp_toggle",
+		"serverName": serverName,
+		"enabled":    enabled,
 	})
 	return err
 }
@@ -885,14 +912,7 @@ func parseHookInput(input any) (types.HookInput, error) {
 			ToolInput:     getMap(data, "tool_input"),
 		}
 		if suggestions, ok := data["permission_suggestions"].([]any); ok {
-			for _, s := range suggestions {
-				if sMap, ok := s.(map[string]any); ok {
-					update := types.PermissionUpdate{
-						Type: types.PermissionUpdateType(getString(sMap, "type")),
-					}
-					input.PermissionSuggestions = append(input.PermissionSuggestions, update)
-				}
-			}
+			input.PermissionSuggestions = types.PermissionUpdatesFromAny(suggestions)
 		}
 		return input, nil
 

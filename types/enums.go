@@ -67,11 +67,11 @@ const (
 type PermissionUpdateType string
 
 const (
-	PermissionUpdateTypeAddRules         PermissionUpdateType = "addRules"
-	PermissionUpdateTypeReplaceRules     PermissionUpdateType = "replaceRules"
-	PermissionUpdateTypeRemoveRules      PermissionUpdateType = "removeRules"
-	PermissionUpdateTypeSetMode          PermissionUpdateType = "setMode"
-	PermissionUpdateTypeAddDirectories   PermissionUpdateType = "addDirectories"
+	PermissionUpdateTypeAddRules          PermissionUpdateType = "addRules"
+	PermissionUpdateTypeReplaceRules      PermissionUpdateType = "replaceRules"
+	PermissionUpdateTypeRemoveRules       PermissionUpdateType = "removeRules"
+	PermissionUpdateTypeSetMode           PermissionUpdateType = "setMode"
+	PermissionUpdateTypeAddDirectories    PermissionUpdateType = "addDirectories"
 	PermissionUpdateTypeRemoveDirectories PermissionUpdateType = "removeDirectories"
 )
 
@@ -126,11 +126,11 @@ const (
 type RateLimitType string
 
 const (
-	RateLimitTypeFiveHour     RateLimitType = "five_hour"
-	RateLimitTypeSevenDay     RateLimitType = "seven_day"
-	RateLimitTypeSevenDayOpus RateLimitType = "seven_day_opus"
+	RateLimitTypeFiveHour       RateLimitType = "five_hour"
+	RateLimitTypeSevenDay       RateLimitType = "seven_day"
+	RateLimitTypeSevenDayOpus   RateLimitType = "seven_day_opus"
 	RateLimitTypeSevenDaySonnet RateLimitType = "seven_day_sonnet"
-	RateLimitTypeOverage      RateLimitType = "overage"
+	RateLimitTypeOverage        RateLimitType = "overage"
 )
 
 // TaskNotificationStatus defines the status of a task notification.

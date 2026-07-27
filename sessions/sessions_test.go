@@ -182,14 +182,3 @@ func TestSanitizeUnicode(t *testing.T) {
 		}
 	}
 }
-
-func TestSanitizePath(t *testing.T) {
-	result := sanitizePath("/Users/test/code/project")
-	if result == "" {
-		t.Error("expected non-empty sanitized path")
-	}
-	// Should not start with a separator
-	if result[0] == filepath.Separator {
-		t.Error("sanitized path should not start with separator")
-	}
-}
