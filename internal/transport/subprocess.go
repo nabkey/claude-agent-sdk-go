@@ -864,12 +864,19 @@ func (t *SubprocessTransport) ReadMessages(ctx context.Context) (<-chan map[stri
 		defer close(msgChan)
 		defer close(errChan)
 
-		if t.stdout == nil {
+		// Close nils stdout, so snapshot it under the lock rather than
+		// reading the field. The pipe stays usable once held: closing it is
+		// what ends this loop.
+		t.closeMu.Lock()
+		stdout := t.stdout
+		t.closeMu.Unlock()
+
+		if stdout == nil {
 			errChan <- errors.NewCLIConnectionError("Not connected", nil)
 			return
 		}
 
-		reader := bufio.NewReaderSize(t.stdout, 64*1024)
+		reader := bufio.NewReaderSize(stdout, 64*1024)
 
 		emit := func(line string) bool {
 			data, err := parseStdoutLine(line, t.maxBufferSize)
@@ -922,11 +929,19 @@ func (t *SubprocessTransport) ReadMessages(ctx context.Context) (<-chan map[stri
 		}
 
 		// Wait for the process to exit and surface a non-zero status.
-		if t.cmd != nil {
-			waitErr := t.wait()
+		//
+		// Close nils t.cmd, so the field is snapshotted under the lock and the
+		// local used from here on. Re-reading it after the nil check raced
+		// Close and dereferenced nil.
+		t.closeMu.Lock()
+		cmd := t.cmd
+		t.closeMu.Unlock()
+
+		if cmd != nil {
+			waitErr := t.wait(cmd)
 			exitCode := 0
-			if t.cmd.ProcessState != nil {
-				exitCode = t.cmd.ProcessState.ExitCode()
+			if cmd.ProcessState != nil {
+				exitCode = cmd.ProcessState.ExitCode()
 			} else if waitErr != nil {
 				exitCode = -1
 			}
@@ -1011,9 +1026,13 @@ func (t *SubprocessTransport) EndInput() error {
 //
 // Both the read loop (to report a non-zero exit) and Close (to reap after
 // termination) need the exit status, but cmd.Wait may only be called once.
-func (t *SubprocessTransport) wait() error {
+//
+// The command is passed in rather than read from t.cmd: Close nils that field,
+// and a caller that outlives Close -- the read loop, or a waitFor goroutine
+// left behind by a timeout -- would otherwise dereference nil.
+func (t *SubprocessTransport) wait(cmd *exec.Cmd) error {
 	t.waitOnce.Do(func() {
-		t.waitErr = t.cmd.Wait()
+		t.waitErr = cmd.Wait()
 	})
 	return t.waitErr
 }
@@ -1056,7 +1075,7 @@ func (t *SubprocessTransport) Close() error {
 	t.writeMu.Unlock()
 
 	if t.cmd.Process != nil {
-		t.terminate()
+		t.terminate(t.cmd)
 	}
 
 	// Let the stderr reader drain before dropping the pipe, so a diagnostic
@@ -1082,27 +1101,30 @@ func (t *SubprocessTransport) Close() error {
 }
 
 // terminate escalates stdin EOF -> SIGTERM -> SIGKILL, waiting between stages.
-func (t *SubprocessTransport) terminate() {
-	if t.waitFor(gracefulShutdownTimeout) {
+func (t *SubprocessTransport) terminate(cmd *exec.Cmd) {
+	if t.waitFor(cmd, gracefulShutdownTimeout) {
 		return
 	}
 
 	// Graceful shutdown timed out; ask the process to terminate.
-	_ = t.cmd.Process.Signal(syscall.SIGTERM)
-	if t.waitFor(gracefulShutdownTimeout) {
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	if t.waitFor(cmd, gracefulShutdownTimeout) {
 		return
 	}
 
 	// SIGTERM handler blocked or absent; force kill.
-	_ = t.cmd.Process.Kill()
-	t.waitFor(gracefulShutdownTimeout)
+	_ = cmd.Process.Kill()
+	t.waitFor(cmd, gracefulShutdownTimeout)
 }
 
 // waitFor reaps the process, reporting whether it exited within the timeout.
-func (t *SubprocessTransport) waitFor(timeout time.Duration) bool {
+//
+// On timeout the goroutine is left running, so it must not touch t.cmd: Close
+// nils that field as soon as waitFor returns.
+func (t *SubprocessTransport) waitFor(cmd *exec.Cmd, timeout time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
-		_ = t.wait()
+		_ = t.wait(cmd)
 		close(done)
 	}()
 	select {
