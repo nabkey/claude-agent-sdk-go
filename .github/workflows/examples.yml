@@ -36,10 +36,19 @@ jobs:
         run: |
           echo "Building all examples..."
           mkdir -p bin
+          out="$PWD/bin"
           for dir in examples/*/; do
             example_name=$(basename "$dir")
             echo "Building $example_name..."
-            go build -o "bin/$example_name" "./$dir"
+            if [ -f "$dir/go.mod" ]; then
+              # A few examples are their own modules, so the root module
+              # cannot build them -- go build resolves ./examples/x against
+              # the main module and reports the package as missing. Build
+              # them where their go.mod is.
+              (cd "$dir" && go build -o "$out/$example_name" .)
+            else
+              go build -o "bin/$example_name" "./$dir"
+            fi
           done
           echo "All examples built successfully!"
           ls -la bin/
