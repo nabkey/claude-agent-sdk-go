@@ -17,7 +17,7 @@ import (
 // --- Message types for Bubble Tea ---
 
 type chatMessage struct {
-	sender  string // "you", "talon", "system"
+	sender  string // "you", "agent", "system"
 	content string
 	ts      time.Time
 }
@@ -70,7 +70,7 @@ var (
 			Foreground(lipgloss.Color("10")).
 			Bold(true)
 
-	talonNameStyle = lipgloss.NewStyle().
+	agentNameStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)
 
@@ -115,6 +115,7 @@ type chatModel struct {
 
 	messages   []chatMessage
 	activities []toolActivity
+	cfg        agentConfig
 	brainURL   string
 	client     *claude.Client
 	ctx        context.Context
@@ -128,9 +129,9 @@ type chatModel struct {
 	lastToolUse string
 }
 
-func newChatModel(brainURL string) chatModel {
+func newChatModel(cfg agentConfig) chatModel {
 	ta := textarea.New()
-	ta.Placeholder = "Message Talon... (enter to send, ctrl+c to quit)"
+	ta.Placeholder = "Message the agent... (enter to send, ctrl+c to quit)"
 	ta.Focus()
 	ta.CharLimit = 2000
 	ta.SetHeight(3)
@@ -140,22 +141,23 @@ func newChatModel(brainURL string) chatModel {
 		chatViewport:    viewport.New(60, 20),
 		sidebarViewport: viewport.New(sidebarWidth-2, 20),
 		textarea:        ta,
-		brainURL:        brainURL,
+		cfg:             cfg,
+		brainURL:        cfg.brainURL,
 		ctx:             context.Background(),
 		waiting:         true,
-		messages:        []chatMessage{{sender: "system", content: "Connecting to Talon...", ts: time.Now()}},
+		messages:        []chatMessage{{sender: "system", content: "Connecting to the sandbox...", ts: time.Now()}},
 	}
 }
 
 var spinChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (m chatModel) Init() tea.Cmd {
-	brainURL := m.brainURL
+	cfg := m.cfg
 	return tea.Batch(
 		textarea.Blink,
 		// Connect client
 		func() tea.Msg {
-			client, err := createChatClient(brainURL)
+			client, err := createChatClient(cfg)
 			if err != nil {
 				return clientReadyMsg{err: err}
 			}
@@ -239,7 +241,7 @@ func (m chatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			m.messages = append(m.messages, chatMessage{
-				sender: "talon", content: msg.content, ts: time.Now(),
+				sender: "agent", content: msg.content, ts: time.Now(),
 			})
 			m.msgCount++
 		}
@@ -297,8 +299,8 @@ func (m *chatModel) renderChat() {
 			header := youNameStyle.Render("You") + " " + systemMsgStyle.Render(ts)
 			sb.WriteString(header + "\n")
 			sb.WriteString(wordWrap(msg.content, w) + "\n\n")
-		case "talon":
-			header := talonNameStyle.Render("Talon") + " " + systemMsgStyle.Render(ts)
+		case "agent":
+			header := agentNameStyle.Render("Claude") + " " + systemMsgStyle.Render(ts)
 			sb.WriteString(header + "\n")
 			sb.WriteString(wordWrap(msg.content, w) + "\n\n")
 		case "system":
@@ -308,7 +310,7 @@ func (m *chatModel) renderChat() {
 
 	if m.waiting {
 		spin := spinChars[m.spinFrame]
-		sb.WriteString(thinkingStyle.Render(spin+" Talon is thinking...") + "\n")
+		sb.WriteString(thinkingStyle.Render(spin+" Claude is thinking...") + "\n")
 	}
 
 	m.chatViewport.SetContent(sb.String())
@@ -368,7 +370,7 @@ func (m chatModel) renderStatusBar() string {
 		connStatus = "○ disconnected"
 		connColor = "9" // red
 	}
-	left := statusKeyStyle.Render("TALON") + " " +
+	left := statusKeyStyle.Render("AGENT") + " " +
 		lipgloss.NewStyle().Foreground(lipgloss.Color(connColor)).Render(connStatus)
 
 	// Center: message count
@@ -395,7 +397,7 @@ func (m chatModel) View() string {
 		return "Loading..."
 	}
 
-	header := headerStyle.Render("~ Talon Chat ~")
+	header := headerStyle.Render("~ Agent Chat ~")
 
 	// Chat panel with border
 	chatW := m.width - sidebarWidth - 1
@@ -421,8 +423,8 @@ func (m chatModel) View() string {
 
 // --- Chat processing ---
 
-func createChatClient(brainURL string) (*claude.Client, error) {
-	return createPersistentClient(context.Background(), brainURL)
+func createChatClient(cfg agentConfig) (*claude.Client, error) {
+	return createPersistentClient(context.Background(), cfg)
 }
 
 // sendChatMessageWithTools sends a message and captures tool use activity.

@@ -557,6 +557,25 @@ claude.QueryWithTransport(ctx, "hello", options, myTransport)
 claude.NewClientWithTransport(ctx, options, myTransport)
 ```
 
+**A custom transport bypasses the SDK's subprocess builder.** Only the
+`initialize` request crosses the wire, so every option that would otherwise
+become a CLI flag — `AllowedTools`, `PermissionMode`, `Cwd`, `AddDirs`,
+`MaxTurns`, `Model`, `SettingSources`, `Sandbox`, `Resume` — is silently
+dropped. Your transport is responsible for reconstructing them.
+
+Two drop out in ways that fail quietly:
+
+- `PermissionPromptToolName` is what routes approvals to `CanUseTool`. Without
+  it the callback is never consulted and the CLI decides every tool call.
+- `MCPServers` registers in-process MCP servers through `--mcp-config`.
+  Without it the CLI never learns your tools exist.
+
+Hooks, `Agents`, system prompts, and the `Client` runtime control methods are
+unaffected — they travel on the control protocol.
+
+[examples/sandbox](examples/sandbox/README.md) is a worked implementation that
+handles all of this, with the CLI running in a sandbox reached over a socket.
+
 ## Session Store
 
 A `SessionStore` mirrors transcripts to external storage, so a multi-tenant or
@@ -682,6 +701,10 @@ See the [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-co
 | [tool_permission_callback](examples/tool_permission_callback/main.go) | Custom permission handling |
 | [typed_tools](examples/typed_tools/main.go) | MCP tools with schemas generated from Go structs |
 | [session_store](examples/session_store/main.go) | Mirroring transcripts to external storage |
+| [sandbox](examples/sandbox/README.md) | A `Transport` that runs the CLI in a sandbox over a socket |
+| [telegram_sandbox](examples/telegram_sandbox/README.md) | Driving a sandboxed session from Telegram, with approvals as inline buttons |
+| [imessage_channel](examples/imessage_channel/main.go) | Thin iMessage auto-responder |
+| [imessage_agent](examples/imessage_agent/README.md) | Self-modifying iMessage agent whose Claude runs in a sandbox |
 
 ## Development
 

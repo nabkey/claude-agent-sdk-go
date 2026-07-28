@@ -1,6 +1,6 @@
 // Example: iMessage Channel
 //
-// This example monitors your iMessages for messages containing the word "talon"
+// This example monitors your iMessages for messages containing the word "claude"
 // and routes them into a Claude Code session via the channels feature. Claude
 // processes the message and can send a reply back via iMessage.
 //
@@ -25,7 +25,7 @@
 //
 //	go run ./examples/imessage_channel
 //
-// Send yourself (or have someone send you) an iMessage containing "talon"
+// Send yourself (or have someone send you) an iMessage containing "claude"
 // and watch Claude process it!
 package main
 
@@ -48,7 +48,7 @@ import (
 )
 
 const (
-	triggerWord  = "talon"
+	triggerWord  = "claude"
 	pollInterval = 3 * time.Second
 )
 

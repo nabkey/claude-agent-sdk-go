@@ -1,25 +1,36 @@
-// Talon Agent: A self-modifying iMessage AI agent.
+// Command imessage_agent is a self-modifying iMessage agent whose Claude runs
+// inside a sandbox.
 //
-// Talon lives inside a Podman container where it can modify its own skills,
-// system prompt, memory, and even its own source code. It communicates with
-// the outside world through iMessage.
+// The agent can rewrite its own skills, system prompt, memory, and source. It
+// reaches the outside world through iMessage, and reaches Claude through the
+// sandbox transport in examples/sandbox — so the process holding your Messages
+// database is not the process that can execute the agent's tool calls.
 //
 // Architecture:
-//   - Outer program (this): polls iMessages, manages Podman, proxies tools, runs Claude
-//   - Brain server (inside container): HTTP server providing tools for self-modification
+//
+//	┌────────────────────────┐        ┌──────────────────────────┐
+//	│ this program (macOS)   │        │ sandbox                  │
+//	│  • polls iMessages     │──────▶ │  • sandbox-host          │
+//	│  • proxies brain tools │ socket │  • claude CLI            │
+//	│  • drives claude.Client│        │  • brain HTTP server     │
+//	└────────────────────────┘        └──────────────────────────┘
+//
+// Unlike an earlier version of this example, the program no longer builds or
+// supervises a container. The sandbox and the brain are started by whoever
+// owns them; this process only connects.
 //
 // Prerequisites:
-//   - macOS with Messages app configured
-//   - Full Disk Access for Terminal (System Settings > Privacy & Security)
-//   - Podman Desktop running
-//   - Claude Code CLI installed
+//   - macOS with Messages configured, and Full Disk Access for the terminal
+//     (System Settings → Privacy & Security → Full Disk Access)
+//   - a sandbox host reachable at -sandbox-address, with the claude CLI
+//     installed alongside it (see examples/sandbox)
+//   - the brain server reachable at -brain-url (see brain/)
 //
 // Usage:
 //
-//	cd examples/talon_agent
-//	go run .
+//	go run . -sandbox-address 127.0.0.1:8378 -brain-url http://localhost:8377
 //
-// Then send an iMessage containing "talon" to trigger the agent.
+// Then send an iMessage containing the trigger word to start a conversation.
 package main
 
 import (
@@ -32,15 +43,15 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/nabkey/claude-agent-sdk-go"
+	claude "github.com/nabkey/claude-agent-sdk-go"
+	"github.com/nabkey/claude-agent-sdk-go/examples/sandbox"
 	"github.com/nabkey/claude-agent-sdk-go/mcp"
 	"github.com/nabkey/claude-agent-sdk-go/types"
 
@@ -48,59 +59,60 @@ import (
 )
 
 const (
-	triggerWord  = "talon"
 	pollInterval = 3 * time.Second
+
+	// brainServerName is the in-process MCP server exposing the brain tools.
+	// It appears in tool names as mcp__brain__<tool>.
+	brainServerName = "brain"
 )
 
+// agentConfig is what the iMessage loop needs to reach its two dependencies.
+type agentConfig struct {
+	brainURL       string
+	sandboxNetwork string
+	sandboxAddress string
+	sandboxToken   string
+	trigger        string
+}
+
 func main() {
-	chatMode := flag.Bool("chat", false, "Start in terminal chat mode instead of iMessage mode")
-	resetMode := flag.Bool("reset", false, "Reset brain to repo template (deletes ~/.talon/src/, re-bootstraps on next run)")
+	var (
+		chatMode = flag.Bool("chat", false, "start the terminal chat TUI instead of iMessage mode")
+		brainURL = flag.String("brain-url", "http://localhost:8377", "brain server base URL")
+		network  = flag.String("sandbox-network", "tcp", `sandbox host network: "tcp" or "unix"`)
+		address  = flag.String("sandbox-address", "127.0.0.1:8378", "sandbox host address or socket path")
+		trigger  = flag.String("trigger", "claude", "only act on iMessages containing this word")
+	)
 	flag.Parse()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	// Find the brain directory (relative to this source file)
-	brainDir := findBrainDir()
-
-	// Check Podman
-	if err := checkPodman(ctx); err != nil {
+	if err := waitForBrain(ctx, *brainURL, 30*time.Second); err != nil {
 		log.Fatal(err)
 	}
+	go watchBrain(ctx, *brainURL)
 
-	// Create container manager
-	container := NewContainerManager(brainDir)
-
-	// Handle --reset
-	if *resetMode {
-		if err := container.Reset(ctx); err != nil {
-			log.Fatal("Reset failed: ", err)
-		}
-		fmt.Println("Brain reset. Run again to re-bootstrap from repo template.")
-		return
+	cfg := agentConfig{
+		brainURL:       *brainURL,
+		sandboxNetwork: *network,
+		sandboxAddress: *address,
+		sandboxToken:   os.Getenv("SANDBOX_TOKEN"),
+		trigger:        strings.ToLower(*trigger),
 	}
-
-	// Start the brain container
-	if err := container.EnsureRunning(ctx); err != nil {
-		log.Fatal("Failed to start brain: ", err)
-	}
-
-	// Start health monitoring
-	go container.WatchAndRecover(ctx)
 
 	if *chatMode {
-		runChatMode(container.BrainURL())
+		runChatMode(cfg)
 		return
 	}
-
-	runIMessageMode(ctx, container)
+	runIMessageMode(ctx, cfg)
 }
 
 // runChatMode starts the interactive terminal chat TUI.
-func runChatMode(brainURL string) {
-	m := newChatModel(brainURL)
+func runChatMode(cfg agentConfig) {
+	m := newChatModel(cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal("TUI error: ", err)
@@ -108,11 +120,11 @@ func runChatMode(brainURL string) {
 }
 
 // runIMessageMode runs the iMessage polling loop with a persistent Claude client.
-func runIMessageMode(ctx context.Context, container *ContainerManager) {
-	fmt.Println("=== Talon Agent (iMessage mode) ===")
+func runIMessageMode(ctx context.Context, cfg agentConfig) {
+	fmt.Println("=== iMessage Agent ===")
 	fmt.Println()
 
-	brainURL := container.BrainURL()
+	brainURL := cfg.brainURL
 
 	// Open iMessage database
 	db, err := openMessagesDB()
@@ -129,7 +141,7 @@ func runIMessageMode(ctx context.Context, container *ContainerManager) {
 	fmt.Printf("Starting from message ID %d\n", lastROWID)
 
 	// Create persistent Claude client
-	client, err := createPersistentClient(ctx, brainURL)
+	client, err := createPersistentClient(ctx, cfg)
 	if err != nil {
 		log.Fatal("Failed to create Claude client: ", err)
 	}
@@ -139,9 +151,10 @@ func runIMessageMode(ctx context.Context, container *ContainerManager) {
 		log.Fatal("Failed to connect Claude client: ", err)
 	}
 
-	fmt.Printf("Brain running at %s\n", brainURL)
+	fmt.Printf("Brain at %s\n", brainURL)
+	fmt.Printf("Sandbox at %s/%s\n", cfg.sandboxNetwork, cfg.sandboxAddress)
 	fmt.Printf("Claude connected (persistent session).\n")
-	fmt.Printf("Watching for iMessages containing %q...\n\n", triggerWord)
+	fmt.Printf("Watching for iMessages containing %q...\n\n", cfg.trigger)
 
 	// Message processing loop
 	ticker := time.NewTicker(pollInterval)
@@ -168,7 +181,7 @@ func runIMessageMode(ctx context.Context, container *ContainerManager) {
 				if msg.IsFromMe {
 					continue
 				}
-				if !strings.Contains(strings.ToLower(msg.Text), triggerWord) {
+				if !strings.Contains(strings.ToLower(msg.Text), cfg.trigger) {
 					continue
 				}
 
@@ -200,24 +213,39 @@ func runIMessageMode(ctx context.Context, container *ContainerManager) {
 	}
 }
 
-// createPersistentClient builds a Claude client with brain tools and system prompt.
-func createPersistentClient(ctx context.Context, brainURL string) (*claude.Client, error) {
-	systemPrompt := fetchBrainState(ctx, brainURL)
-	tools := buildBrainTools(brainURL)
-	talonServer := mcp.NewSDKServer("talon", "1.0.0", tools...)
+// createPersistentClient builds a Claude client whose CLI runs in the sandbox,
+// with the brain tools served in-process from here.
+func createPersistentClient(ctx context.Context, cfg agentConfig) (*claude.Client, error) {
+	systemPrompt := fetchBrainState(ctx, cfg.brainURL)
+	tools := buildBrainTools(cfg.brainURL)
+	brainServer := mcp.NewSDKServer(brainServerName, "1.0.0", tools...)
 
-	bypassPerms := types.PermissionModeBypassPermissions
+	// The host has to be told the in-process server exists; the SDK would
+	// normally do that with --mcp-config, which a custom transport never
+	// emits. Without this the brain tools are silently unavailable.
+	start := sandbox.DefaultStartRequest()
+	start.SDKMCPServers = []string{brainServerName}
+
+	transport := sandbox.New(sandbox.Config{
+		Network: cfg.sandboxNetwork,
+		Address: cfg.sandboxAddress,
+		Token:   cfg.sandboxToken,
+		Start:   start,
+		Stderr:  func(line string) { log.Printf("cli: %s", line) },
+	})
+
+	// Tools, PermissionMode and MaxTurns are deliberately absent: they become
+	// CLI flags, so they belong to the sandbox host's policy rather than here.
+	// Run the host with -allowed-tools and -max-turns to bound this session.
 	options := &claude.AgentOptions{
 		MCPServers: map[string]types.MCPServerConfig{
-			"talon": talonServer,
+			brainServerName: brainServer,
 		},
-		Tools:              brainToolNames(),
-		PermissionMode:     &bypassPerms,
-		MaxTurns:           claude.Int(25),
 		AppendSystemPrompt: &systemPrompt,
+		Warn:               func(w string) { log.Printf("sdk warning: %s", w) },
 	}
 
-	return claude.NewClient(ctx, options)
+	return claude.NewClientWithTransport(ctx, options, transport)
 }
 
 // processIMessage sends an iMessage through the persistent client.
@@ -388,35 +416,4 @@ func openMessagesDB() (*sql.DB, error) {
 	}
 
 	return db, nil
-}
-
-// findBrainDir locates the brain/ directory relative to this source file.
-func findBrainDir() string {
-	// Try relative to working directory first
-	if info, err := os.Stat("brain"); err == nil && info.IsDir() {
-		abs, _ := filepath.Abs("brain")
-		return abs
-	}
-	// Try relative to source file
-	_, filename, _, _ := runtime.Caller(0)
-	dir := filepath.Dir(filename)
-	return filepath.Join(dir, "brain")
-}
-
-// checkPodman verifies Podman is available and running.
-func checkPodman(ctx context.Context) error {
-	out, err := podmanVersion(ctx)
-	if err != nil {
-		return fmt.Errorf("podman not found. Install Podman Desktop: https://podman-desktop.io\n%w", err)
-	}
-	fmt.Printf("Podman: %s\n", strings.TrimSpace(out))
-	return nil
-}
-
-func podmanVersion(ctx context.Context) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "podman", "version", "--format", "{{.Server.Version}}")
-	out, err := cmd.Output()
-	return string(out), err
 }

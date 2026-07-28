@@ -1,4 +1,9 @@
 bin/
 *.lock
-examples/talon_agent/talon-agent
+
+# Compiled example binaries (each example is its own module)
+examples/imessage_agent/imessage_agent
+examples/imessage_agent/brain/brain
 examples/imessage_channel/imessage_channel
+examples/telegram_sandbox/telegram_sandbox
+examples/sandbox/sandbox-host

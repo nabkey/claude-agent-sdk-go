@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — sandboxed transport and chat front ends
+
+New examples for running the CLI somewhere other than the process that holds
+the session, and driving it from a phone.
+
+- `examples/sandbox` — a `claude.Transport` that reaches the CLI over a
+  socket, plus the `sandbox-host` daemon that serves it. The host builds the
+  CLI argv rather than the client: a custom transport bypasses the SDK's
+  subprocess builder, so the sandbox operator, not the dialing client, decides
+  the containment flags. Supports unix sockets, TCP, TLS, and a constant-time
+  shared token.
+- `examples/telegram_sandbox` — a Telegram bot with one Claude session per
+  chat, tool approvals as inline keyboards, debounced live streaming, and the
+  runtime control surface mapped to slash commands. Refuses to start without a
+  user allowlist.
+
+Documented the custom-transport flag-drop in the README: `AllowedTools`,
+`PermissionMode`, `Cwd`, `MaxTurns`, `SettingSources` and friends are CLI
+flags that a custom transport never emits. Two fail silently and are called
+out specifically — `PermissionPromptToolName` (without it `CanUseTool` is
+never consulted) and `MCPServers` (without it in-process MCP servers are never
+registered).
+
+### Changed
+
+- `examples/talon_agent` is now `examples/imessage_agent`, and its Claude runs
+  through the sandbox transport instead of a Podman container the example
+  managed itself. The brain and the sandbox are now started by whoever owns
+  them; the program only connects. Its self-modification features are
+  unchanged.
+- The `imessage_channel` example's trigger word is `claude` rather than
+  `talon`.
+
+### Fixed
+
+- `examples/imessage_channel` was missing a `go.sum` entry for
+  `golang.org/x/text` and did not build.
+
 ### Added — streaming transport, control surface, and session store
 
 Brings the SDK to parity with the Python (0.2.128) and TypeScript (0.3.220)

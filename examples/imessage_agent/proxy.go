@@ -250,7 +250,7 @@ func brainToolNames() []string {
 	tools := buildBrainTools("") // URL doesn't matter, just need names
 	names := make([]string, len(tools))
 	for i, t := range tools {
-		names[i] = fmt.Sprintf("mcp__talon__%s", t.Name)
+		names[i] = fmt.Sprintf("mcp__brain__%s", t.Name)
 	}
 	return names
 }
