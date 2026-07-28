@@ -82,6 +82,7 @@ func QueryWithTransport(ctx context.Context, prompt string, options *AgentOption
 			if msg == nil {
 				continue
 			}
+			sess.shadow.observe(msg)
 			select {
 			case msgChan <- msg:
 			case <-ctx.Done():

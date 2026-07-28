@@ -192,6 +192,19 @@ fixtures in `types/responses_test.go`:
   always `0` and `RateLimits` always empty. Both the object and the legacy
   array shape are now accepted.
 
+- A `CanUseTool` callback that is never consulted now produces a warning at the
+  end of the turn, reporting how many tool calls were approved without it. The
+  existing check could only inspect `AgentOptions`, but permission modes and
+  allow rules in settings files shadow the callback just as effectively — and
+  since a nil `SettingSources` now loads every filesystem settings file, that
+  became the common case rather than an exotic one. A user-level
+  `"defaultMode": "auto"` silently disabled the callback with nothing to show
+  for it, which matters because `CanUseTool` is frequently used as a security
+  gate. Watching what actually happens catches every shadowing source —
+  including sandboxes and the surrounding environment — without reimplementing
+  the CLI's settings precedence. The static warning now also states that it
+  covers `AgentOptions` only.
+
 ### Security
 
 - `--resume` is now passed as `--resume=<value>`. The CLI declares `--resume`

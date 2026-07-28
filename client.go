@@ -22,6 +22,7 @@ type Client struct {
 	transport Transport
 	custom    Transport
 	query     *protocol.Query
+	shadow    *shadowDetector
 	connected bool
 	mu        sync.Mutex
 
@@ -68,6 +69,7 @@ func (c *Client) Connect(ctx context.Context, prompt string) error {
 
 	c.transport = sess.transport
 	c.query = sess.query
+	c.shadow = sess.shadow
 	c.connected = true
 
 	if prompt != "" {
@@ -180,6 +182,7 @@ func (c *Client) receive(stopAtResult bool) <-chan types.Message {
 
 	c.mu.Lock()
 	query := c.query
+	shadow := c.shadow
 	// Only an open-ended consumer claims the stream exclusively; a
 	// per-response consumer hands it back when it stops at a result.
 	alreadyTaken := c.streamTaken
@@ -205,6 +208,7 @@ func (c *Client) receive(stopAtResult bool) <-chan types.Message {
 			if err != nil || msg == nil {
 				continue
 			}
+			shadow.observe(msg)
 
 			select {
 			case msgChan <- msg:

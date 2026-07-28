@@ -22,6 +22,9 @@ const defaultInitializeTimeout = 60 * time.Second
 type session struct {
 	transport Transport
 	query     *protocol.Query
+	// shadow watches for a CanUseTool callback that never gets consulted. Nil
+	// when no callback is installed; the methods tolerate that.
+	shadow *shadowDetector
 }
 
 // buildTransportOptions projects the public options onto the subprocess
@@ -138,6 +141,8 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 		opts.PermissionPromptToolName = &stdio
 	}
 
+	shadow := newShadowDetector(opts)
+
 	var (
 		trans Transport
 		err   error
@@ -163,6 +168,7 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 			if opts.CanUseTool == nil {
 				return &types.PermissionResultAllow{}, nil
 			}
+			shadow.noteConsult()
 			return opts.CanUseTool(ctx, toolName, input, permCtx)
 		},
 		Hooks:                  opts.Hooks,
@@ -182,7 +188,7 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 		return nil, err
 	}
 
-	return &session{transport: trans, query: query}, nil
+	return &session{transport: trans, query: query, shadow: shadow}, nil
 }
 
 // buildInitConfig assembles the configuration carried on the initialize
