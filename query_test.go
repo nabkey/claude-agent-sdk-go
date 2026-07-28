@@ -19,6 +19,15 @@ import (
 // This is what makes the streaming machinery testable without a real CLI
 // binary, which the SDK previously had no way to do.
 type scriptedTransport struct {
+	// writeMu is held for the whole of Write, and Close must acquire it
+	// before closing the stream. A script answers a request by spawning a
+	// goroutine from onRequest, so without this a script that ends the run
+	// can close the channel before Write has pushed the response to the very
+	// request it is answering -- push then drops it and the SDK waits for a
+	// reply that will never come. That is a fake-transport ordering bug, not
+	// an SDK one: a real CLI writes its response before anything else.
+	writeMu sync.Mutex
+
 	mu      sync.Mutex
 	written []string
 	closed  bool
@@ -65,6 +74,10 @@ func (s *scriptedTransport) IsReady() bool                 { return true }
 func (s *scriptedTransport) EndInput() error               { return nil }
 
 func (s *scriptedTransport) Close() error {
+	// Let any in-flight Write finish pushing its response first.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.closed {
@@ -79,6 +92,9 @@ func (s *scriptedTransport) ReadMessages(context.Context) (<-chan map[string]any
 }
 
 func (s *scriptedTransport) Write(_ context.Context, data string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
 	s.written = append(s.written, data)
 	closed := s.closed
