@@ -413,6 +413,11 @@ func TestQuerySilentWhenCanUseToolConsulted(t *testing.T) {
 						"input":     map[string]any{"command": "ls"},
 					},
 				})
+				// The CLI holds the turn open until the permission verdict
+				// arrives. Ending it early races the SDK's dispatch.
+				if err := trans.awaitResponse("perm-1", 5*time.Second); err != nil {
+					t.Errorf("permission dispatch: %v", err)
+				}
 				trans.push(resultFrame())
 				_ = trans.Close()
 			}()

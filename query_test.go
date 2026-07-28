@@ -26,6 +26,12 @@ type scriptedTransport struct {
 	msgChan chan map[string]any
 	errChan chan error
 
+	// responded carries the request_id of each control_response the SDK
+	// writes back. The CLI does not move on until it has the reply, so a
+	// script that pushes the next frame without waiting for one races the
+	// SDK's dispatch.
+	responded chan string
+
 	// onRequest answers an outgoing control request. Returning nil sends an
 	// empty success payload.
 	onRequest func(subtype string, request map[string]any) map[string]any
@@ -33,8 +39,24 @@ type scriptedTransport struct {
 
 func newScriptedTransport() *scriptedTransport {
 	return &scriptedTransport{
-		msgChan: make(chan map[string]any, 64),
-		errChan: make(chan error, 1),
+		msgChan:   make(chan map[string]any, 64),
+		errChan:   make(chan error, 1),
+		responded: make(chan string, 16),
+	}
+}
+
+// awaitResponse blocks until the SDK answers the given control request.
+func (s *scriptedTransport) awaitResponse(requestID string, within time.Duration) error {
+	deadline := time.After(within)
+	for {
+		select {
+		case got := <-s.responded:
+			if got == requestID {
+				return nil
+			}
+		case <-deadline:
+			return fmt.Errorf("no control_response for %q within %s", requestID, within)
+		}
 	}
 }
 
@@ -69,6 +91,17 @@ func (s *scriptedTransport) Write(_ context.Context, data string) error {
 
 	var frame map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &frame); err != nil {
+		return nil
+	}
+	if frame["type"] == "control_response" {
+		if response, ok := frame["response"].(map[string]any); ok {
+			if requestID, ok := response["request_id"].(string); ok {
+				select {
+				case s.responded <- requestID:
+				default:
+				}
+			}
+		}
 		return nil
 	}
 	if frame["type"] != "control_request" {
@@ -248,6 +281,12 @@ func TestQuerySupportsHooks(t *testing.T) {
 					},
 				},
 			})
+			// The CLI waits for the hook's verdict before carrying on.
+			// Ending the turn without waiting races the SDK's dispatch and
+			// makes this test flaky.
+			if err := trans.awaitResponse("hook-1", 5*time.Second); err != nil {
+				t.Errorf("hook dispatch: %v", err)
+			}
 			trans.push(resultFrame())
 			_ = trans.Close()
 		}()
