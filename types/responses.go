@@ -5,6 +5,11 @@ package types
 // yields the zero value rather than an error, so a newer CLI adding fields (or
 // an older one omitting them) never breaks a caller.
 
+import (
+	"sort"
+	"time"
+)
+
 // SlashCommand describes a command available in the session.
 type SlashCommand struct {
 	Name         string   `json:"name"`
@@ -43,9 +48,15 @@ func SlashCommandsFromAny(raw any) []SlashCommand {
 
 // ModelInfo describes a model the session can select.
 type ModelInfo struct {
-	Model       string `json:"model"`
-	DisplayName string `json:"displayName,omitempty"`
-	Description string `json:"description,omitempty"`
+	// Model is the selector to pass to Client.SetModel or AgentOptions.Model.
+	// The CLI sends this as "value", and it may be an alias such as "default"
+	// or "opus[1m]" rather than a concrete model ID.
+	Model string `json:"model"`
+	// ResolvedModel is the concrete model the selector resolves to, such as
+	// "claude-opus-5[1m]". Empty when the CLI does not report one.
+	ResolvedModel string `json:"resolvedModel,omitempty"`
+	DisplayName   string `json:"displayName,omitempty"`
+	Description   string `json:"description,omitempty"`
 }
 
 // ModelInfosFromAny decodes a list of models.
@@ -61,11 +72,15 @@ func ModelInfosFromAny(raw any) []ModelInfo {
 			continue
 		}
 		info := ModelInfo{
-			Model:       mapString(m, "model"),
-			DisplayName: mapString(m, "displayName"),
-			Description: mapString(m, "description"),
+			Model:         mapString(m, "value"),
+			ResolvedModel: mapString(m, "resolvedModel"),
+			DisplayName:   mapString(m, "displayName"),
+			Description:   mapString(m, "description"),
 		}
-		// Older payloads key the identifier as "name".
+		// Older payloads key the selector as "model" or "name".
+		if info.Model == "" {
+			info.Model = mapString(m, "model")
+		}
 		if info.Model == "" {
 			info.Model = mapString(m, "name")
 		}
@@ -316,11 +331,15 @@ func ReloadPluginsResultFromMap(m map[string]any) *ReloadPluginsResult {
 }
 
 // ReadFileResult is the content of a file read through the session.
+//
+// The CLI reports only the text and the path it resolved. It does not echo
+// back an encoding, a size, or a truncation flag -- and as of CLI 2.1.220 it
+// ignores the maxBytes hint entirely, returning the whole file.
 type ReadFileResult struct {
-	Content   string `json:"content"`
-	Encoding  string `json:"encoding,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
-	Size      int    `json:"size,omitempty"`
+	// Content is the file's text. The CLI sends this as "contents".
+	Content string `json:"content"`
+	// AbsPath is the absolute path the CLI resolved the read to.
+	AbsPath string `json:"absPath,omitempty"`
 }
 
 // ReadFileResultFromMap decodes a file read response.
@@ -328,29 +347,45 @@ func ReadFileResultFromMap(m map[string]any) *ReadFileResult {
 	if m == nil {
 		return nil
 	}
-	return &ReadFileResult{
-		Content:   mapString(m, "content"),
-		Encoding:  mapString(m, "encoding"),
-		Truncated: mapBool(m, "truncated"),
-		Size:      mapInt(m, "size"),
+	result := &ReadFileResult{
+		Content: mapString(m, "contents"),
+		AbsPath: mapString(m, "absPath"),
 	}
+	// Tolerate the singular spelling in case another CLI build emits it.
+	if result.Content == "" {
+		result.Content = mapString(m, "content")
+	}
+	return result
 }
 
 // RateLimitWindow is utilization of one plan rate-limit window.
 type RateLimitWindow struct {
-	Type        string  `json:"type,omitempty"`
+	// Type names the window, such as "five_hour" or "seven_day".
+	Type string `json:"type,omitempty"`
+	// Utilization is the percentage of the window consumed, 0-100.
 	Utilization float64 `json:"utilization,omitempty"`
-	ResetsAt    int64   `json:"resetsAt,omitempty"`
+	// ResetsAt is the Unix timestamp in seconds when the window resets. The
+	// CLI sends an RFC 3339 string; it is parsed here so this matches the
+	// epoch-seconds convention of RateLimitInfo.ResetsAt.
+	ResetsAt int64 `json:"resetsAt,omitempty"`
 }
 
 // SessionUsage is the structured data behind the /usage command.
 type SessionUsage struct {
-	// TotalCostUSD is the session's cost so far.
+	// TotalCostUSD is the session's cost so far. The CLI nests this under
+	// "session", not at the top level.
 	TotalCostUSD float64 `json:"totalCostUSD,omitempty"`
+	// SubscriptionType is the plan backing the session, such as "max".
+	SubscriptionType string `json:"subscriptionType,omitempty"`
 	// RateLimitsAvailable is false for API key, Bedrock, Vertex and other
 	// sessions where plan limits do not apply.
-	RateLimitsAvailable bool              `json:"rateLimitsAvailable,omitempty"`
-	RateLimits          []RateLimitWindow `json:"rateLimits,omitempty"`
+	RateLimitsAvailable bool `json:"rateLimitsAvailable,omitempty"`
+	// RateLimits holds the populated plan windows, ordered by name. The CLI
+	// sends these as a keyed object in which most windows are null, and it
+	// carries several non-window entries ("limits", "spend", "extra_usage")
+	// alongside them; only the populated windows appear here. Reach into Raw
+	// for the normalized "limits" array or the spend breakdown.
+	RateLimits []RateLimitWindow `json:"rateLimits,omitempty"`
 	// Raw is the full response, including per-model usage breakdowns.
 	Raw map[string]any `json:"-"`
 }
@@ -361,26 +396,81 @@ func SessionUsageFromMap(m map[string]any) *SessionUsage {
 		return nil
 	}
 	usage := &SessionUsage{
-		TotalCostUSD:        mapFloat(m, "totalCostUSD"),
+		SubscriptionType:    mapString(m, "subscription_type"),
 		RateLimitsAvailable: mapBool(m, "rate_limits_available") || mapBool(m, "rateLimitsAvailable"),
 		Raw:                 m,
 	}
-	windows, ok := m["rate_limits"].([]any)
+	if usage.SubscriptionType == "" {
+		usage.SubscriptionType = mapString(m, "subscriptionType")
+	}
+
+	// Cost lives under "session"; fall back to a top-level key for other
+	// CLI builds.
+	if session, ok := m["session"].(map[string]any); ok {
+		usage.TotalCostUSD = mapFloat(session, "total_cost_usd")
+	}
+	if usage.TotalCostUSD == 0 {
+		usage.TotalCostUSD = mapFloat(m, "totalCostUSD")
+	}
+	if usage.TotalCostUSD == 0 {
+		usage.TotalCostUSD = mapFloat(m, "total_cost_usd")
+	}
+
+	raw, ok := m["rate_limits"]
 	if !ok {
-		windows, _ = m["rateLimits"].([]any)
+		raw = m["rateLimits"]
 	}
-	for _, item := range windows {
-		w, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		usage.RateLimits = append(usage.RateLimits, RateLimitWindow{
-			Type:        mapString(w, "type"),
-			Utilization: mapFloat(w, "utilization"),
-			ResetsAt:    int64(mapFloat(w, "resetsAt")),
-		})
-	}
+	usage.RateLimits = rateLimitWindows(raw)
 	return usage
+}
+
+// rateLimitWindows decodes the rate-limit windows from either wire shape.
+//
+// Current CLI builds send an object keyed by window name; earlier drafts sent
+// an array of windows carrying their own "type". Both are accepted.
+func rateLimitWindows(raw any) []RateLimitWindow {
+	switch v := raw.(type) {
+	case map[string]any:
+		// Most keys are null placeholders for windows that do not apply, and
+		// a few siblings ("limits", "spend", "extra_usage") are not windows
+		// at all. Rather than blacklist those names -- the CLI adds new ones
+		// -- accept only entries shaped like a window: a numeric utilization.
+		var windows []RateLimitWindow
+		for name, entry := range v {
+			w, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			utilization, ok := w["utilization"].(float64)
+			if !ok {
+				continue
+			}
+			windows = append(windows, RateLimitWindow{
+				Type:        name,
+				Utilization: utilization,
+				ResetsAt:    mapEpochSeconds(w, "resets_at", "resetsAt"),
+			})
+		}
+		// Map iteration is unordered; sort so callers see a stable list.
+		sort.Slice(windows, func(i, j int) bool { return windows[i].Type < windows[j].Type })
+		return windows
+
+	case []any:
+		var windows []RateLimitWindow
+		for _, item := range v {
+			w, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			windows = append(windows, RateLimitWindow{
+				Type:        mapString(w, "type"),
+				Utilization: mapFloat(w, "utilization"),
+				ResetsAt:    mapEpochSeconds(w, "resets_at", "resetsAt"),
+			})
+		}
+		return windows
+	}
+	return nil
 }
 
 // McpServerStatusesFromAny decodes a list of MCP server statuses.
@@ -474,6 +564,29 @@ func mapFloat(m map[string]any, key string) float64 {
 
 func mapInt(m map[string]any, key string) int {
 	return int(mapFloat(m, key))
+}
+
+// mapEpochSeconds reads a timestamp under the first key that yields one,
+// accepting either epoch seconds or an RFC 3339 string.
+//
+// The CLI renders rate-limit resets as RFC 3339 with a numeric offset
+// ("2026-07-28T03:39:59.901559+00:00"), which time.RFC3339 parses -- Go
+// tolerates the fractional seconds even though the layout omits them.
+func mapEpochSeconds(m map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		switch v := m[key].(type) {
+		case float64:
+			return int64(v)
+		case string:
+			if v == "" {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				return t.Unix()
+			}
+		}
+	}
+	return 0
 }
 
 func mapStrings(m map[string]any, key string) []string {

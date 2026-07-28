@@ -174,6 +174,24 @@ Verified against the Python (0.2.128) and TypeScript (0.3.220) Agent SDKs; see
   `CLAUDE_CONFIG_DIR` is honored, and a prefix-scan fallback handles long-path
   hash mismatches.
 
+Three control-response decoders were written against the reference SDKs'
+documented shapes rather than the wire, and returned zero values against a real
+CLI. Corrected against captures from CLI 2.1.220, with those captures kept as
+fixtures in `types/responses_test.go`:
+
+- `Client.SupportedModels()` read the selector from `model`, which the CLI does
+  not send; it sends `value`, plus `resolvedModel` for the concrete model.
+  `ModelInfo.Model` was therefore always empty, leaving no identifier to pass
+  back to `SetModel`. The legacy `model` and `name` keys remain accepted.
+- `Client.ReadFile()` read `content`; the CLI sends `contents`, alongside the
+  resolved `absPath`. `ReadFileResult.Content` was therefore always empty.
+- `Client.GetSessionUsage()` read `totalCostUSD` at the top level, decoded
+  `rate_limits` as an array, and expected epoch-number timestamps. The CLI
+  nests cost under `session.total_cost_usd`, keys `rate_limits` as an object of
+  named windows, and renders resets as RFC 3339 strings. Cost was therefore
+  always `0` and `RateLimits` always empty. Both the object and the legacy
+  array shape are now accepted.
+
 ### Security
 
 - `--resume` is now passed as `--resume=<value>`. The CLI declares `--resume`
@@ -225,6 +243,17 @@ Verified against the Python (0.2.128) and TypeScript (0.3.220) Agent SDKs; see
 - `types.TaskUsage` fields `InputTokens`, `OutputTokens`,
   `CacheCreationInputTokens`, `CacheReadInputTokens` are replaced by
   `TotalTokens`, `ToolUses`, `DurationMS` to match the wire format.
+- `types.ReadFileResult` drops `Encoding`, `Truncated` and `Size`, and gains
+  `AbsPath`. The CLI sends only the contents and the resolved path; as of
+  2.1.220 it ignores the `maxBytes` hint and returns the whole file, so nothing
+  reported truncation.
+- `types.ModelInfo` gains `ResolvedModel`. `Model` now carries the CLI's
+  selector (`default`, `opus[1m]`), which may be an alias rather than a
+  concrete model ID.
+- `types.SessionUsage` gains `SubscriptionType`. `RateLimits` is now ordered by
+  window name, and lists only the populated windows — the CLI's `rate_limits`
+  object is mostly null placeholders and carries non-window siblings
+  (`limits`, `spend`, `extra_usage`), which stay reachable via `Raw`.
 - `types.ThinkingConfigEnabled.BudgetTokens` changes from `int` to `*int`, so
   "no budget" (which the CLI treats as adaptive) is distinguishable from zero.
   Prefer the new constructors: `types.NewThinkingAdaptive()`,

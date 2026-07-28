@@ -110,14 +110,11 @@ func writeTranscript(t *testing.T, path string, entries []map[string]any) {
 }
 
 func TestListSessions(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "claude-sessions-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 
-	projectDir := getProjectDir(tmpDir)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
+	projectDir := getProjectDir(canonicalizePath(tmpDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,14 +142,11 @@ func TestListSessions(t *testing.T) {
 }
 
 func TestRenameSession(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "claude-sessions-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 
-	projectDir := getProjectDir(tmpDir)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
+	projectDir := getProjectDir(canonicalizePath(tmpDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -162,8 +156,7 @@ func TestRenameSession(t *testing.T) {
 	_, _ = file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
 	file.Close()
 
-	err = RenameSession(sessionID, "New Title", &tmpDir)
-	if err != nil {
+	if err := RenameSession(sessionID, "New Title", &tmpDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -181,14 +174,11 @@ func TestRenameSession(t *testing.T) {
 }
 
 func TestTagSession(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "claude-sessions-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 
-	projectDir := getProjectDir(tmpDir)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
+	projectDir := getProjectDir(canonicalizePath(tmpDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,14 +189,12 @@ func TestTagSession(t *testing.T) {
 	file.Close()
 
 	tag := "important"
-	err = TagSession(sessionID, &tag, &tmpDir)
-	if err != nil {
+	if err := TagSession(sessionID, &tag, &tmpDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Test clearing tag
-	err = TagSession(sessionID, nil, &tmpDir)
-	if err != nil {
+	if err := TagSession(sessionID, nil, &tmpDir); err != nil {
 		t.Fatalf("unexpected error clearing tag: %v", err)
 	}
 }
