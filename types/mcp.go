@@ -77,8 +77,8 @@ type StdioChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *StdioChannelServer) isChannelServerConfig()        {}
-func (s *StdioChannelServer) ChannelServerType() string     { return "stdio" }
+func (s *StdioChannelServer) isChannelServerConfig()    {}
+func (s *StdioChannelServer) ChannelServerType() string { return "stdio" }
 
 // SSEChannelServer represents a channel server that communicates via Server-Sent Events.
 type SSEChannelServer struct {
@@ -88,8 +88,8 @@ type SSEChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *SSEChannelServer) isChannelServerConfig()        {}
-func (s *SSEChannelServer) ChannelServerType() string     { return "sse" }
+func (s *SSEChannelServer) isChannelServerConfig()    {}
+func (s *SSEChannelServer) ChannelServerType() string { return "sse" }
 
 // HTTPChannelServer represents a channel server that communicates via HTTP.
 type HTTPChannelServer struct {
@@ -99,8 +99,8 @@ type HTTPChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *HTTPChannelServer) isChannelServerConfig()        {}
-func (s *HTTPChannelServer) ChannelServerType() string     { return "http" }
+func (s *HTTPChannelServer) isChannelServerConfig()    {}
+func (s *HTTPChannelServer) ChannelServerType() string { return "http" }
 
 // WebSocketChannelServer represents a channel server that communicates via WebSocket.
 type WebSocketChannelServer struct {
@@ -110,16 +110,31 @@ type WebSocketChannelServer struct {
 	Capabilities []ChannelCapability `json:"capabilities,omitempty"`
 }
 
-func (s *WebSocketChannelServer) isChannelServerConfig()        {}
-func (s *WebSocketChannelServer) ChannelServerType() string     { return "ws" }
+func (s *WebSocketChannelServer) isChannelServerConfig()    {}
+func (s *WebSocketChannelServer) ChannelServerType() string { return "ws" }
 
-// SandboxNetworkConfig defines network configuration for sandbox.
+// SandboxNetworkConfig defines network configuration for the sandbox.
 type SandboxNetworkConfig struct {
-	AllowUnixSockets    []string `json:"allowUnixSockets,omitempty"`
-	AllowAllUnixSockets *bool    `json:"allowAllUnixSockets,omitempty"`
-	AllowLocalBinding   *bool    `json:"allowLocalBinding,omitempty"`
-	HTTPProxyPort       *int     `json:"httpProxyPort,omitempty"`
-	SOCKSProxyPort      *int     `json:"socksProxyPort,omitempty"`
+	// AllowedDomains are domains sandboxed processes may reach.
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	// DeniedDomains are always blocked, even if AllowedDomains matches them.
+	DeniedDomains []string `json:"deniedDomains,omitempty"`
+	// AllowManagedDomainsOnly honors only managed-settings AllowedDomains.
+	AllowManagedDomainsOnly *bool `json:"allowManagedDomainsOnly,omitempty"`
+	// AllowUnixSockets are socket paths reachable in the sandbox, e.g. an
+	// SSH agent.
+	AllowUnixSockets []string `json:"allowUnixSockets,omitempty"`
+	// AllowAllUnixSockets permits every Unix socket. Less secure.
+	AllowAllUnixSockets *bool `json:"allowAllUnixSockets,omitempty"`
+	// AllowLocalBinding permits binding localhost ports. macOS only.
+	AllowLocalBinding *bool `json:"allowLocalBinding,omitempty"`
+	// AllowMachLookup lists XPC/Mach service names to allow, with an optional
+	// trailing wildcard. macOS only.
+	AllowMachLookup []string `json:"allowMachLookup,omitempty"`
+	// HTTPProxyPort is the port of a caller-supplied HTTP proxy.
+	HTTPProxyPort *int `json:"httpProxyPort,omitempty"`
+	// SOCKSProxyPort is the port of a caller-supplied SOCKS5 proxy.
+	SOCKSProxyPort *int `json:"socksProxyPort,omitempty"`
 }
 
 // SandboxIgnoreViolations defines violations to ignore in sandbox.
@@ -128,19 +143,42 @@ type SandboxIgnoreViolations struct {
 	Network []string `json:"network,omitempty"`
 }
 
-// SandboxSettings defines sandbox configuration for bash command isolation.
+// SandboxSettings configures how Claude Code sandboxes bash commands for
+// filesystem and network isolation.
+//
+// Filesystem and network *restrictions* are configured through permission
+// rules, not here: Read deny rules for read access, Edit rules for writes,
+// WebFetch rules for network. These settings control sandbox behavior.
 type SandboxSettings struct {
-	Enabled                   *bool                    `json:"enabled,omitempty"`
-	AutoAllowBashIfSandboxed  *bool                    `json:"autoAllowBashIfSandboxed,omitempty"`
-	ExcludedCommands          []string                 `json:"excludedCommands,omitempty"`
-	AllowUnsandboxedCommands  *bool                    `json:"allowUnsandboxedCommands,omitempty"`
-	Network                   *SandboxNetworkConfig    `json:"network,omitempty"`
-	IgnoreViolations          *SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
-	EnableWeakerNestedSandbox *bool                    `json:"enableWeakerNestedSandbox,omitempty"`
+	// Enabled turns on bash sandboxing. macOS and Linux only.
+	Enabled *bool `json:"enabled,omitempty"`
+	// AutoAllowBashIfSandboxed auto-approves bash commands that run
+	// sandboxed. Defaults to true.
+	AutoAllowBashIfSandboxed *bool `json:"autoAllowBashIfSandboxed,omitempty"`
+	// ExcludedCommands run outside the sandbox, e.g. ["git", "docker"].
+	ExcludedCommands []string `json:"excludedCommands,omitempty"`
+	// AllowUnsandboxedCommands lets commands opt out via
+	// dangerouslyDisableSandbox. When false every command must run sandboxed
+	// or appear in ExcludedCommands. Defaults to true.
+	AllowUnsandboxedCommands *bool `json:"allowUnsandboxedCommands,omitempty"`
+	// Network configures sandbox networking.
+	Network *SandboxNetworkConfig `json:"network,omitempty"`
+	// IgnoreViolations suppresses reporting for specific paths and hosts.
+	IgnoreViolations *SandboxIgnoreViolations `json:"ignoreViolations,omitempty"`
+	// EnableWeakerNestedSandbox enables a weaker sandbox for unprivileged
+	// Docker environments. Linux only, and reduces security.
+	EnableWeakerNestedSandbox *bool `json:"enableWeakerNestedSandbox,omitempty"`
+	// FailIfUnavailable fails the query when sandbox dependencies are
+	// missing rather than silently running unsandboxed. Defaults to true when
+	// Enabled is set through AgentOptions.
+	FailIfUnavailable *bool `json:"failIfUnavailable,omitempty"`
 }
 
 // PluginConfig defines a plugin configuration.
 type PluginConfig struct {
 	Type string `json:"type"` // "local"
 	Path string `json:"path"`
+	// SkipMCPDiscovery loads the plugin without registering the MCP servers
+	// it declares.
+	SkipMCPDiscovery bool `json:"-"`
 }

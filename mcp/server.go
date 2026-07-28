@@ -70,7 +70,10 @@ func (s *SDKServer) toHandler() *protocol.MCPServerHandler {
 			Description: t.Description,
 			InputSchema: t.InputSchema,
 			Handler:     t.Handler,
-			Annotations: t.Annotations,
+			Meta:        t.meta(),
+		}
+		if t.Annotations != nil {
+			mcpTools[i].Annotations = t.Annotations
 		}
 	}
 

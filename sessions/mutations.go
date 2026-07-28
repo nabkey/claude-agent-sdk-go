@@ -17,10 +17,7 @@ func RenameSession(sessionID, title string, directory *string) error {
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
 	title = sanitizeUnicode(title)
 
@@ -40,10 +37,7 @@ func TagSession(sessionID string, tag *string, directory *string) error {
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
 	entry := map[string]any{
 		"type": "session_metadata",
@@ -60,7 +54,10 @@ func TagSession(sessionID string, tag *string, directory *string) error {
 
 // appendToSession appends a JSON entry to a session JSONL file using atomic O_APPEND writes.
 func appendToSession(absDir, sessionID string, entry map[string]any) error {
-	projectDir := getProjectDir(absDir)
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 
 	// Verify the session file exists

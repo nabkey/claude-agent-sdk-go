@@ -166,14 +166,14 @@ func TestParseHookInput_PreToolUseWithNewFields(t *testing.T) {
 
 func TestParseHookInput_SubagentStopWithNewFields(t *testing.T) {
 	input := map[string]any{
-		"hook_event_name":      "SubagentStop",
-		"session_id":           "sess-1",
-		"transcript_path":      "/path",
-		"cwd":                  "/home",
-		"stop_hook_active":     true,
-		"agent_id":             "agent-2",
+		"hook_event_name":       "SubagentStop",
+		"session_id":            "sess-1",
+		"transcript_path":       "/path",
+		"cwd":                   "/home",
+		"stop_hook_active":      true,
+		"agent_id":              "agent-2",
 		"agent_transcript_path": "/agent/path",
-		"agent_type":           "Explore",
+		"agent_type":            "Explore",
 	}
 
 	hookInput, err := parseHookInput(input)
@@ -201,7 +201,7 @@ func TestHookOutputToMap_PreToolUseWithAdditionalContext(t *testing.T) {
 	ctx := "Additional context for the tool"
 	output := &types.HookOutput{
 		HookSpecificOutput: &types.PreToolUseHookSpecificOutput{
-			HookEventName:    "PreToolUse",
+			HookEventName:     "PreToolUse",
 			AdditionalContext: &ctx,
 		},
 	}
@@ -219,7 +219,7 @@ func TestHookOutputToMap_PreToolUseWithAdditionalContext(t *testing.T) {
 func TestHookOutputToMap_PostToolUseWithUpdatedMCPToolOutput(t *testing.T) {
 	output := &types.HookOutput{
 		HookSpecificOutput: &types.PostToolUseHookSpecificOutput{
-			HookEventName:       "PostToolUse",
+			HookEventName:        "PostToolUse",
 			UpdatedMCPToolOutput: map[string]any{"result": "modified"},
 		},
 	}

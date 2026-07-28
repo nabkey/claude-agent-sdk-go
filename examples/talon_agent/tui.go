@@ -271,7 +271,7 @@ func (m *chatModel) recalcLayout() {
 		contentH = 5
 	}
 
-	m.chatViewport.Width = chatW - 2  // account for border padding
+	m.chatViewport.Width = chatW - 2 // account for border padding
 	m.chatViewport.Height = contentH
 	m.sidebarViewport.Width = sidebarWidth - 4
 	m.sidebarViewport.Height = contentH

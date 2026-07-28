@@ -30,7 +30,7 @@ type PreToolUseHookInput struct {
 	ToolUseID     string         `json:"tool_use_id,omitempty"`
 }
 
-func (p *PreToolUseHookInput) isHookInput()              {}
+func (p *PreToolUseHookInput) isHookInput()                {}
 func (p *PreToolUseHookInput) GetHookEventName() HookEvent { return HookEventPreToolUse }
 
 // PostToolUseHookInput is the input for PostToolUse hook events.
@@ -45,7 +45,7 @@ type PostToolUseHookInput struct {
 	ToolUseID     string         `json:"tool_use_id,omitempty"`
 }
 
-func (p *PostToolUseHookInput) isHookInput()              {}
+func (p *PostToolUseHookInput) isHookInput()                {}
 func (p *PostToolUseHookInput) GetHookEventName() HookEvent { return HookEventPostToolUse }
 
 // UserPromptSubmitHookInput is the input for UserPromptSubmit hook events.
@@ -55,7 +55,7 @@ type UserPromptSubmitHookInput struct {
 	Prompt        string    `json:"prompt"`
 }
 
-func (u *UserPromptSubmitHookInput) isHookInput()              {}
+func (u *UserPromptSubmitHookInput) isHookInput()                {}
 func (u *UserPromptSubmitHookInput) GetHookEventName() HookEvent { return HookEventUserPromptSubmit }
 
 // StopHookInput is the input for Stop hook events.
@@ -65,7 +65,7 @@ type StopHookInput struct {
 	StopHookActive bool      `json:"stop_hook_active"`
 }
 
-func (s *StopHookInput) isHookInput()              {}
+func (s *StopHookInput) isHookInput()                {}
 func (s *StopHookInput) GetHookEventName() HookEvent { return HookEventStop }
 
 // SubagentStopHookInput is the input for SubagentStop hook events.
@@ -78,7 +78,7 @@ type SubagentStopHookInput struct {
 	AgentType           string    `json:"agent_type,omitempty"`
 }
 
-func (s *SubagentStopHookInput) isHookInput()              {}
+func (s *SubagentStopHookInput) isHookInput()                {}
 func (s *SubagentStopHookInput) GetHookEventName() HookEvent { return HookEventSubagentStop }
 
 // PreCompactHookInput is the input for PreCompact hook events.
@@ -89,7 +89,7 @@ type PreCompactHookInput struct {
 	CustomInstructions *string   `json:"custom_instructions,omitempty"`
 }
 
-func (p *PreCompactHookInput) isHookInput()              {}
+func (p *PreCompactHookInput) isHookInput()                {}
 func (p *PreCompactHookInput) GetHookEventName() HookEvent { return HookEventPreCompact }
 
 // PostToolUseFailureHookInput is the input for PostToolUseFailure hook events.
@@ -102,8 +102,10 @@ type PostToolUseFailureHookInput struct {
 	IsInterrupt   bool      `json:"is_interrupt"`
 }
 
-func (p *PostToolUseFailureHookInput) isHookInput()              {}
-func (p *PostToolUseFailureHookInput) GetHookEventName() HookEvent { return HookEventPostToolUseFailure }
+func (p *PostToolUseFailureHookInput) isHookInput() {}
+func (p *PostToolUseFailureHookInput) GetHookEventName() HookEvent {
+	return HookEventPostToolUseFailure
+}
 
 // SubagentStartHookInput is the input for SubagentStart hook events.
 type SubagentStartHookInput struct {
@@ -113,7 +115,7 @@ type SubagentStartHookInput struct {
 	AgentType     string    `json:"agent_type"`
 }
 
-func (s *SubagentStartHookInput) isHookInput()              {}
+func (s *SubagentStartHookInput) isHookInput()                {}
 func (s *SubagentStartHookInput) GetHookEventName() HookEvent { return HookEventSubagentStart }
 
 // NotificationHookInput is the input for Notification hook events.
@@ -125,7 +127,7 @@ type NotificationHookInput struct {
 	NotificationType string    `json:"notification_type"`
 }
 
-func (n *NotificationHookInput) isHookInput()              {}
+func (n *NotificationHookInput) isHookInput()                {}
 func (n *NotificationHookInput) GetHookEventName() HookEvent { return HookEventNotification }
 
 // PermissionRequestHookInput is the input for PermissionRequest hook events.
@@ -137,7 +139,7 @@ type PermissionRequestHookInput struct {
 	PermissionSuggestions []PermissionUpdate `json:"permission_suggestions,omitempty"`
 }
 
-func (p *PermissionRequestHookInput) isHookInput()              {}
+func (p *PermissionRequestHookInput) isHookInput()                {}
 func (p *PermissionRequestHookInput) GetHookEventName() HookEvent { return HookEventPermissionRequest }
 
 // HookContext provides context for hook callbacks.
@@ -152,7 +154,7 @@ type HookSpecificOutput interface {
 
 // PreToolUseHookSpecificOutput is the hook-specific output for PreToolUse events.
 type PreToolUseHookSpecificOutput struct {
-	HookEventName            string         `json:"hookEventName"` // "PreToolUse"
+	HookEventName            string         `json:"hookEventName"`                // "PreToolUse"
 	PermissionDecision       *string        `json:"permissionDecision,omitempty"` // "allow", "deny", "ask"
 	PermissionDecisionReason *string        `json:"permissionDecisionReason,omitempty"`
 	UpdatedInput             map[string]any `json:"updatedInput,omitempty"`
@@ -163,9 +165,9 @@ func (p *PreToolUseHookSpecificOutput) isHookSpecificOutput() {}
 
 // PostToolUseHookSpecificOutput is the hook-specific output for PostToolUse events.
 type PostToolUseHookSpecificOutput struct {
-	HookEventName       string  `json:"hookEventName"` // "PostToolUse"
-	AdditionalContext   *string `json:"additionalContext,omitempty"`
-	UpdatedMCPToolOutput any    `json:"updatedMcpToolOutput,omitempty"`
+	HookEventName        string  `json:"hookEventName"` // "PostToolUse"
+	AdditionalContext    *string `json:"additionalContext,omitempty"`
+	UpdatedMCPToolOutput any     `json:"updatedMcpToolOutput,omitempty"`
 }
 
 func (p *PostToolUseHookSpecificOutput) isHookSpecificOutput() {}

@@ -4,42 +4,23 @@ import (
 	"context"
 
 	"github.com/nabkey/claude-agent-sdk-go/internal/protocol"
-	"github.com/nabkey/claude-agent-sdk-go/internal/transport"
 	"github.com/nabkey/claude-agent-sdk-go/types"
 )
 
-// Query executes a one-shot query to Claude Code and returns a channel of messages.
+// Query runs a one-shot query and returns a channel of messages.
 //
-// This function is ideal for simple, stateless queries where you don't need
-// bidirectional communication or conversation management. For interactive,
-// stateful conversations, use Client instead.
+// The channel yields types.Message values, plus any error, before closing.
+// Range over it to consume the conversation.
 //
-// Key differences from Client:
-//   - Unidirectional: Send prompt, receive all responses
-//   - Stateless: Each query is independent, no conversation state
-//   - Simple: Fire-and-forget style, no connection management
-//   - No interrupts: Cannot interrupt or send follow-up messages
-//
-// When to use Query():
-//   - Simple one-off questions ("What is 2+2?")
-//   - Batch processing of independent prompts
-//   - Code generation or analysis tasks
-//   - Automated scripts and CI/CD pipelines
-//   - When you know all inputs upfront
-//
-// When to use Client:
-//   - Interactive conversations with follow-ups
-//   - Chat applications or REPL-like interfaces
-//   - When you need to send messages based on responses
-//   - When you need interrupt capabilities
-//   - Long-running sessions with state
+// Query is unidirectional and stateless: the prompt goes out, the responses
+// come back, and the session ends. It runs the CLI in streaming mode, so
+// Hooks, CanUseTool, and in-process SDK MCP servers all work here. What it
+// cannot do is send follow-up messages or interrupt a run mid-flight; use
+// Client for those.
 //
 // Example:
 //
-//	ctx := context.Background()
-//
-//	// Simple query with nil options (uses defaults)
-//	for msg := range claude.Query(ctx, "What is the capital of France?", nil) {
+//	for msg := range claude.Query(ctx, "What is 2 + 2?", nil) {
 //	    switch m := msg.(type) {
 //	    case *types.AssistantMessage:
 //	        for _, block := range m.Content {
@@ -50,20 +31,18 @@ import (
 //	    case *types.ResultMessage:
 //	        fmt.Printf("Cost: $%.4f\n", *m.TotalCostUSD)
 //	    case error:
-//	        log.Printf("Error: %v", m)
+//	        log.Printf("error: %v", m)
 //	    }
 //	}
-//
-//	// Query with options
-//	options := &claude.AgentOptions{
-//	    SystemPrompt: claude.String("You are a helpful coding assistant"),
-//	    MaxTurns:     claude.Int(1),
-//	}
-//
-//	for msg := range claude.Query(ctx, "Write hello world in Go", options) {
-//	    // Process messages...
-//	}
 func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any {
+	return QueryWithTransport(ctx, prompt, options, nil)
+}
+
+// QueryWithTransport is Query against a caller-supplied Transport.
+//
+// Use it to run the CLI somewhere other than a local subprocess, or to drive
+// the SDK from a scripted fake in tests.
+func QueryWithTransport(ctx context.Context, prompt string, options *AgentOptions, transport Transport) <-chan any {
 	msgChan := make(chan any, 100)
 
 	go func() {
@@ -73,142 +52,78 @@ func Query(ctx context.Context, prompt string, options *AgentOptions) <-chan any
 			options = DefaultAgentOptions()
 		}
 
-		// Build transport options (non-streaming mode for Query)
-		transportOpts := &transport.SubprocessOptions{
-			SystemPrompt:           options.SystemPrompt,
-			AppendSystemPrompt:     options.AppendSystemPrompt,
-			Tools:                  options.Tools,
-			AllowedTools:           options.AllowedTools,
-			DisallowedTools:        options.DisallowedTools,
-			MaxTurns:               options.MaxTurns,
-			MaxBudgetUSD:           options.MaxBudgetUSD,
-			Model:                  options.Model,
-			FallbackModel:          options.FallbackModel,
-			PermissionMode:         options.PermissionMode,
-			ContinueConversation:   options.ContinueConversation,
-			Resume:                 options.Resume,
-			Settings:               options.Settings,
-			Sandbox:                options.Sandbox,
-			AddDirs:                options.AddDirs,
-			MCPServers:             options.MCPServers,
-			Channels:               options.Channels,
-			IncludePartialMessages: options.IncludePartialMessages,
-			ForkSession:            options.ForkSession,
-			Agents:                 options.Agents,
-			SettingSources:         options.SettingSources,
-			Plugins:                options.Plugins,
-			ExtraArgs:              options.ExtraArgs,
-			MaxThinkingTokens:      options.MaxThinkingTokens,
-			Thinking:               options.Thinking,
-			Effort:                 effortToString(options.Effort),
-			OutputFormat:           options.OutputFormat,
-			Betas:                  options.Betas,
-			EnableFileCheckpointing: options.EnableFileCheckpointing,
-			MCPConfigPath:          options.MCPConfigPath,
-			CLIPath:                options.CLIPath,
-			Cwd:                    options.Cwd,
-			Env:                    options.Env,
-			MaxBufferSize:          options.MaxBufferSize,
-			Stderr:                 options.Stderr,
-			User:                   options.User,
-			PersistSession:         options.PersistSession,
-			AgentProgressSummaries: options.AgentProgressSummaries,
-			ToolConfig:             options.ToolConfig,
-		}
-
-		// Create transport (non-streaming mode)
-		trans, err := transport.NewSubprocessTransport(prompt, false, transportOpts)
+		sess, err := newSession(ctx, prompt, options, transport)
 		if err != nil {
 			msgChan <- err
 			return
 		}
-		defer func() { _ = trans.Close() }()
+		defer func() { _ = sess.close() }()
 
-		// Connect
-		if err := trans.Connect(ctx); err != nil {
+		// Send the prompt as a user turn now that initialize has completed.
+		err = sess.writeUserMessage(ctx, types.UserInputMessage{
+			Type:    "user",
+			Message: types.UserInputInner{Role: "user", Content: prompt},
+		})
+		if err != nil {
 			msgChan <- err
 			return
 		}
 
-		// Read messages
-		rawMsgChan, errChan := trans.ReadMessages(ctx)
+		// Close stdin once the run can no longer need the control channel.
+		// Hooks and SDK MCP servers hold it open until a run-ending result.
+		go func() { _ = sess.query.WaitForResultAndEndInput(ctx) }()
 
-		for {
-			select {
-			case <-ctx.Done():
-				msgChan <- ctx.Err()
-				return
-
-			case err, ok := <-errChan:
-				if ok && err != nil {
-					msgChan <- err
-				}
-				return
-
-			case raw, ok := <-rawMsgChan:
-				if !ok {
-					return
-				}
-
-				msg, err := protocol.ParseMessage(raw)
-				if err != nil {
-					msgChan <- err
-					continue
-				}
-				if msg == nil {
-					continue
-				}
-
-				msgChan <- msg
+		for raw := range sess.query.ReceiveMessages() {
+			msg, err := protocol.ParseMessage(raw)
+			if err != nil {
+				msgChan <- err
+				continue
 			}
+			if msg == nil {
+				continue
+			}
+			sess.shadow.observe(msg)
+			select {
+			case msgChan <- msg:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		if err := sess.query.Err(); err != nil {
+			msgChan <- err
 		}
 	}()
 
 	return msgChan
 }
 
-// QuerySync executes a query and collects all messages into a slice.
-// This is a convenience function for when you want all results at once.
+// QuerySync runs a query and collects every message.
 //
-// Example:
-//
-//	messages, err := claude.QuerySync(ctx, "What is 2+2?", nil)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//
-//	for _, msg := range messages {
-//	    // Process messages...
-//	}
+// The returned error is the first failure encountered; messages received
+// before it are still returned.
 func QuerySync(ctx context.Context, prompt string, options *AgentOptions) ([]types.Message, error) {
 	var messages []types.Message
-	var lastError error
+	var firstErr error
 
 	for msg := range Query(ctx, prompt, options) {
 		switch m := msg.(type) {
 		case types.Message:
 			messages = append(messages, m)
 		case error:
-			lastError = m
+			if firstErr == nil {
+				firstErr = m
+			}
 		}
 	}
 
-	return messages, lastError
+	return messages, firstErr
 }
 
-// QueryText executes a query and returns just the text response.
-// This is a convenience function for simple text-only interactions.
-//
-// Example:
-//
-//	answer, err := claude.QueryText(ctx, "What is the capital of France?", nil)
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	fmt.Println(answer) // "Paris"
+// QueryText runs a query and returns the concatenated assistant text.
 func QueryText(ctx context.Context, prompt string, options *AgentOptions) (string, error) {
 	var text string
-	var lastError error
+	var firstErr error
 
 	for msg := range Query(ctx, prompt, options) {
 		switch m := msg.(type) {
@@ -219,9 +134,11 @@ func QueryText(ctx context.Context, prompt string, options *AgentOptions) (strin
 				}
 			}
 		case error:
-			lastError = m
+			if firstErr == nil {
+				firstErr = m
+			}
 		}
 	}
 
-	return text, lastError
+	return text, firstErr
 }

@@ -12,10 +12,15 @@ go get github.com/nabkey/claude-agent-sdk-go
 
 - Go 1.24+
 
-**Note:** The Claude Code CLI is automatically bundled with the package or downloaded on first use—no separate installation required! The SDK will use the bundled CLI by default. If you prefer to use a system-wide installation or a specific version, you can:
+**Note:** The Claude Code CLI must be installed separately. The SDK looks for a
+`claude` binary on `PATH` and then in the usual install locations
+(`~/.npm-global/bin`, `/usr/local/bin`, `~/.local/bin`, `~/node_modules/.bin`,
+`~/.yarn/bin`, `~/.claude/local`).
 
-- Install Claude Code separately: `curl -fsSL https://claude.ai/install.sh | bash`
-- Specify a custom path: `claude.AgentOptions{CLIPath: claude.String("/path/to/claude")}`
+- Install Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`
+- Or specify a custom path: `claude.AgentOptions{CLIPath: claude.String("/path/to/claude")}`
+
+Minimum supported CLI version: **2.0.0**.
 
 ## Quick Start
 
@@ -56,6 +61,10 @@ func main() {
 ## Basic Usage: Query()
 
 `Query()` is a helper function for querying Claude Code. It returns a read-only channel of response messages. See [query.go](query.go).
+
+`Query()` runs the CLI in streaming mode, so `Hooks`, `CanUseTool`, and
+in-process SDK MCP servers all work here. What it cannot do is send follow-up
+messages or interrupt a run mid-flight — use [`Client`](#client) for those.
 
 ```go
 // Simple query — returns <-chan any (messages or errors)
@@ -113,7 +122,10 @@ options := &claude.AgentOptions{
 
 `Client` supports bidirectional, interactive conversations with Claude Code. See [client.go](client.go).
 
-Unlike `Query()`, the `Client` additionally enables **custom tools**, **hooks**, and **runtime control** (interrupts, model changes, MCP management, etc.).
+Both entry points support custom tools, hooks, and permission callbacks. What
+`Client` adds is **runtime control**: interrupts, follow-up messages, model and
+permission changes mid-session, MCP management, context usage, file rewind, and
+the rest of the control surface listed below.
 
 ```go
 ctx := context.Background()
@@ -345,27 +357,36 @@ client.ToggleMCPServer(ctx, "my-server", false)
 Control Claude's reasoning behavior:
 
 ```go
-// Adaptive thinking — model decides when to think
+// Adaptive thinking — model decides when to think (Opus 4.6+)
 options := &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigAdaptive{Type: "adaptive"},
+	Thinking: types.NewThinkingAdaptive(),
 }
 
-// Enabled thinking with a token budget
+// Fixed thinking token budget (older models)
 options = &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigEnabled{
-		Type:         "enabled",
-		BudgetTokens: 10000,
-	},
+	Thinking: types.NewThinkingEnabled(10000),
 }
 
 // Disabled thinking
 options = &claude.AgentOptions{
-	Thinking: &types.ThinkingConfigDisabled{Type: "disabled"},
+	Thinking: types.NewThinkingDisabled(),
 }
 
 // Effort level (low, medium, high, max)
 options = claude.DefaultAgentOptions().WithEffort(types.EffortLevelHigh)
 ```
+
+Set `Display` to control whether thinking text is returned. Opus 4.7+ defaults
+to `omitted` (signature only); request `summarized` to receive text:
+
+```go
+display := types.ThinkingDisplaySummarized
+options := &claude.AgentOptions{
+	Thinking: &types.ThinkingConfigAdaptive{Type: "adaptive", Display: &display},
+}
+```
+
+`Thinking` takes precedence over the deprecated `MaxThinkingTokens`.
 
 ## Beta Features
 
@@ -388,9 +409,18 @@ client, _ := claude.NewClient(ctx, options)
 defer client.Close()
 client.Connect(ctx, "Make some changes to my code")
 
-// Later, rewind to a specific point
-client.RewindFiles(ctx, "user-message-id")
+// Preview first — nothing is written
+preview, _ := client.PreviewRewindFiles(ctx, "user-message-id")
+fmt.Printf("would change %d files\n", len(preview.FilesChanged))
+
+// Then apply
+result, _ := client.RewindFiles(ctx, "user-message-id")
+fmt.Printf("restored %d files (+%d/-%d)\n",
+	len(result.FilesChanged), result.Insertions, result.Deletions)
 ```
+
+To learn the message UUIDs to rewind to, enable user-message replay:
+`ExtraArgs: map[string]*string{"replay-user-messages": nil}`.
 
 ## System Prompt and Tools Presets
 
@@ -414,6 +444,139 @@ options = &claude.AgentOptions{
 	},
 }
 ```
+
+The `claude_code` tools preset selects the CLI's full default tool set. Pass an
+explicit `[]string` to select individual tools, or an empty `[]string{}` to
+disable all built-in tools.
+
+## Setting Sources
+
+`SettingSources` controls which filesystem settings the CLI loads:
+
+```go
+// Load user and project settings (project is required for CLAUDE.md)
+options := &claude.AgentOptions{
+	SettingSources: []types.SettingSource{
+		types.SettingSourceUser,
+		types.SettingSourceProject,
+	},
+}
+
+// SDK isolation mode: load no filesystem settings at all
+options = &claude.AgentOptions{
+	SettingSources: []types.SettingSource{},
+}
+```
+
+Leaving `SettingSources` nil loads **all** sources, matching the CLI default.
+Note the distinction: a nil slice omits the flag entirely, whereas an empty
+non-nil slice explicitly disables filesystem settings.
+
+## Per-Tool Configuration
+
+`ToolConfig` configures built-in tools. Today this covers the preview format
+for `AskUserQuestion` options — use HTML for web-based consumers:
+
+```go
+options := claude.DefaultAgentOptions().
+	WithAskUserQuestionPreviewFormat(types.PreviewFormatHTML)
+```
+
+## Runtime Control
+
+`Client` exposes the CLI's control protocol:
+
+```go
+// Conversation
+client.Interrupt(ctx)
+client.InterruptWithOptions(ctx, true) // also cancel queued messages
+client.SetPermissionMode(ctx, types.PermissionModeAcceptEdits)
+client.SetModel(ctx, claude.String("claude-sonnet-5"))
+client.ApplyFlagSettings(ctx, map[string]any{"effortLevel": "high"})
+
+// Introspection
+usage, _ := client.GetContextUsage(ctx)
+info := client.InitializationResult()   // commands, agents, models, account
+models, _ := client.SupportedModels(ctx)
+commands := client.SupportedCommands()
+agents := client.SupportedAgents()
+
+// MCP
+status, _ := client.GetMCPStatus(ctx)
+client.ReconnectMCPServer(ctx, "my-server")
+client.ToggleMCPServer(ctx, "my-server", false)
+client.SetMCPServers(ctx, servers)
+
+// Tasks and files
+client.StopTask(ctx, taskID)
+client.BackgroundTasks(ctx, "")         // background everything in flight
+client.ReadFile(ctx, "src/main.go", 0, "utf-8")
+client.ReloadPlugins(ctx)
+client.ReloadSkills(ctx)
+```
+
+## Typed MCP Tools
+
+`NewToolFor` derives a tool's JSON Schema from a Go struct and hands the
+handler a decoded value, so there is no hand-written schema to keep in step:
+
+```go
+type AddArgs struct {
+	A float64 `json:"a" jsonschema:"the first addend"`
+	B float64 `json:"b" jsonschema:"the second addend"`
+}
+
+addTool, err := mcp.NewToolFor("add", "Add two numbers",
+	func(ctx context.Context, args AddArgs) (map[string]any, error) {
+		return mcp.TextResult(fmt.Sprintf("%g", args.A+args.B)), nil
+	})
+```
+
+`mcp.NewTool` remains for hand-written schemas. See
+[examples/typed_tools](examples/typed_tools/main.go).
+
+## Custom Transports
+
+`Transport` abstracts how the SDK talks to Claude Code. The default spawns the
+`claude` CLI locally; supply your own to run it in a container, a VM, or a
+remote worker — or to drive the SDK from a scripted fake in tests, with no
+binary required:
+
+```go
+type Transport interface {
+	Connect(ctx context.Context) error
+	Write(ctx context.Context, data string) error
+	ReadMessages(ctx context.Context) (<-chan map[string]any, <-chan error)
+	EndInput() error
+	Close() error
+	IsReady() bool
+}
+
+// Either entry point accepts one:
+claude.QueryWithTransport(ctx, "hello", options, myTransport)
+claude.NewClientWithTransport(ctx, options, myTransport)
+```
+
+## Session Store
+
+A `SessionStore` mirrors transcripts to external storage, so a multi-tenant or
+serverless deployment can resume a session that was never on this machine's
+disk. Only `Append` and `Load` are required; listing, deletion, summaries, and
+subagent enumeration are separate optional interfaces a store may also
+implement.
+
+```go
+store := claude.NewInMemorySessionStore() // or your own adapter
+
+options := claude.DefaultAgentOptions().WithSessionStore(store)
+
+for msg := range claude.Query(ctx, "Hello", options) { /* ... */ }
+
+projectKey := claude.ProjectKeyForDirectory(".")
+sessions, _ := claude.ListSessionsFromStore(ctx, store, projectKey)
+```
+
+See [examples/session_store](examples/session_store/main.go).
 
 ## Session Management
 
@@ -464,13 +627,16 @@ options := &claude.AgentOptions{
 See [types/](types/) for complete type definitions:
 
 - **Messages**: `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage`, `StreamEvent`, `RateLimitEvent`
-- **Task messages**: `TaskStartedMessage`, `TaskProgressMessage`, `TaskNotificationMessage`
-- **Content blocks**: `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `ToolResultBlock`
-- **Configuration**: `AgentOptions`, `AgentDefinition`, `ThinkingConfig`, `EffortLevel`, `SdkBeta`
+- **Task messages**: `TaskStartedMessage`, `TaskProgressMessage`, `TaskNotificationMessage`, `TaskUpdatedMessage`
+- **System messages**: `HookEventMessage`, `CompactBoundaryMessage`, `SessionStateChangedMessage`, `PermissionDeniedMessage`, `APIRetryMessage`, `StatusMessage`, `ToolProgressMessage`, `PromptSuggestionMessage`, `MirrorErrorMessage`
+- **Content blocks**: `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `ToolResultBlock`, `ServerToolUseBlock`, `ServerToolResultBlock`
+- **Results**: `ModelUsage`, `PermissionDenial`, `DeferredToolUse`, `TerminalReason`
+- **Configuration**: `AgentOptions`, `AgentDefinition`, `ThinkingConfig`, `ThinkingDisplay`, `EffortLevel`, `SdkBeta`, `ToolConfig`
 - **MCP**: `MCPServerConfig`, `McpStatusResponse`, `McpServerStatus`, `McpToolInfo`
 - **Hooks**: `HookInput`, `HookOutput`, `HookCallback`, `HookMatcher`
-- **Permissions**: `PermissionResult`, `PermissionUpdate`, `ToolPermissionContext`
-- **Sessions**: `SDKSessionInfo`, `SessionMessage`
+- **Permissions**: `PermissionResult`, `PermissionUpdate`, `PermissionUpdateFromMap`, `ToolPermissionContext`
+- **Sessions**: `SDKSessionInfo`, `SessionMessage`, `SessionKey`, `SessionStoreEntry`, `SessionSummaryEntry`
+- **Control responses**: `InitializeResult`, `ContextUsage`, `RewindFilesResult`, `InterruptResult`, `SlashCommand`, `ModelInfo`, `AgentInfo`, `AccountInfo`
 
 ## Error Handling
 
@@ -514,6 +680,8 @@ See the [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-co
 | [system_prompt](examples/system_prompt/main.go) | Custom system prompts |
 | [session_resume](examples/session_resume/main.go) | Resuming previous sessions |
 | [tool_permission_callback](examples/tool_permission_callback/main.go) | Custom permission handling |
+| [typed_tools](examples/typed_tools/main.go) | MCP tools with schemas generated from Go structs |
+| [session_store](examples/session_store/main.go) | Mirroring transcripts to external storage |
 
 ## Development
 

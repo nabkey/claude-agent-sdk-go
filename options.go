@@ -9,144 +9,296 @@ import (
 
 // AgentOptions configures the behavior of Query and Client operations.
 type AgentOptions struct {
-	// Tools defines the base set of tools available.
-	// Can be a []string of tool names, *types.ToolsPreset, or nil to use defaults.
+	// --- Tools and permissions ---------------------------------------------
+
+	// Tools defines the base set of built-in tools available.
+	// Accepts []string of tool names, *types.ToolsPreset, or nil for the
+	// CLI's defaults. An empty []string disables all built-in tools.
 	Tools any
 
-	// AllowedTools specifies which tools are allowed to be used.
+	// AllowedTools lists tools auto-approved without prompting. To restrict
+	// which tools exist at all, use Tools instead.
 	AllowedTools []string
 
-	// DisallowedTools specifies which tools are not allowed.
+	// DisallowedTools lists tools removed from the model's context entirely.
 	DisallowedTools []string
 
-	// SystemPrompt sets or replaces the system prompt.
-	// Can be a *string, *types.SystemPromptPreset, or nil to use the default.
-	SystemPrompt any
+	// ToolAliases redirects model-emitted tool names before resolution, e.g.
+	// {"Bash": "mcp__workspace__bash"} to route Bash into a sandboxed MCP
+	// tool. Single-hop: an alias pointing at another alias resolves literally.
+	ToolAliases map[string]string
 
-	// AppendSystemPrompt appends to the default system prompt.
-	AppendSystemPrompt *string
-
-	// MCPServers configures MCP servers by name.
-	MCPServers map[string]types.MCPServerConfig
-
-	// Channels configures channel servers that can push messages into the session.
-	// This is a research preview feature (--channels).
-	Channels map[string]types.ChannelServerConfig
+	// ToolConfig provides per-tool configuration for built-in tools.
+	ToolConfig *types.ToolConfig
 
 	// PermissionMode controls how tool permissions are handled.
 	PermissionMode *types.PermissionMode
 
-	// ContinueConversation continues the most recent conversation.
-	ContinueConversation bool
+	// AllowDangerouslySkipPermissions must be set alongside
+	// types.PermissionModeBypassPermissions. It is a deliberate speed bump.
+	AllowDangerouslySkipPermissions bool
 
-	// Resume resumes a specific session by ID.
-	Resume *string
+	// PermissionPromptToolName routes permission requests through an MCP
+	// tool. Mutually exclusive with CanUseTool.
+	PermissionPromptToolName *string
 
-	// MaxTurns limits the number of agentic iterations.
-	MaxTurns *int
+	// CanUseTool is called when a tool call would otherwise prompt the user.
+	// It is not consulted for calls already permitted by AllowedTools,
+	// PermissionMode, or settings allow rules -- those never reach a prompt.
+	// To gate every call regardless, use a PreToolUse hook.
+	CanUseTool CanUseToolCallback
 
-	// MaxBudgetUSD limits the maximum cost in USD.
-	MaxBudgetUSD *float64
+	// PlanModeInstructions replaces the default workflow body in plan mode's
+	// system reminder. Only meaningful with types.PermissionModePlan.
+	PlanModeInstructions *string
+
+	// --- Prompting ----------------------------------------------------------
+
+	// SystemPrompt sets or replaces the system prompt. Accepts *string,
+	// []string (blocks; include types.SystemPromptDynamicBoundary to mark the
+	// cacheable prefix), *types.SystemPromptPreset, *types.SystemPromptFile,
+	// or nil.
+	SystemPrompt any
+
+	// AppendSystemPrompt appends to the system prompt.
+	AppendSystemPrompt *string
+
+	// Agent runs the main thread as a named agent, applying that agent's
+	// prompt, tool restrictions, and model. The agent must be defined in
+	// Agents or in settings.
+	Agent *string
+
+	// Agents defines custom subagents invokable via the Agent tool.
+	Agents map[string]types.AgentDefinition
+
+	// Skills enables skills for the main session. Accepts []string of skill
+	// names or types.SkillsAll. This is the single place to turn skills on:
+	// the SDK also allows the Skill tool and defaults SettingSources so the
+	// CLI can discover them.
+	//
+	// This is a context filter, not a sandbox: unlisted skills are hidden
+	// from the model but their files remain readable. Do not store secrets
+	// in skill files.
+	Skills any
+
+	// --- Model and reasoning -------------------------------------------------
 
 	// Model specifies the Claude model to use.
 	Model *string
 
-	// FallbackModel specifies a fallback model if the primary is unavailable.
+	// FallbackModel is used if the primary model is overloaded. It must
+	// differ from Model.
 	FallbackModel *string
 
-	// PermissionPromptToolName sets a custom tool for permission prompts.
-	// Set to "stdio" for SDK control protocol.
-	PermissionPromptToolName *string
+	// MaxTurns limits the number of agentic iterations.
+	MaxTurns *int
 
-	// Cwd sets the working directory for the CLI.
-	Cwd *string
+	// MaxBudgetUSD stops the query once this cost is exceeded.
+	MaxBudgetUSD *float64
 
-	// CLIPath specifies a custom path to the Claude CLI binary.
-	CLIPath *string
+	// TaskBudget makes the model aware of a remaining token budget so it can
+	// pace tool use and wrap up before the limit.
+	TaskBudget *types.TaskBudget
 
-	// Settings specifies settings as JSON string or file path.
-	Settings *string
-
-	// AddDirs adds additional directories for context.
-	AddDirs []string
-
-	// Env sets environment variables for the CLI process.
-	Env map[string]string
-
-	// ExtraArgs passes arbitrary CLI flags.
-	ExtraArgs map[string]*string
-
-	// MaxBufferSize sets the maximum buffer size for CLI output (default: 1MB).
-	MaxBufferSize *int
-
-	// Stderr is a callback for stderr output from CLI.
-	Stderr func(string)
-
-	// CanUseTool is a callback for tool permission requests.
-	// Only works in streaming mode.
-	CanUseTool CanUseToolCallback
-
-	// Hooks configures hook callbacks for various events.
-	Hooks map[types.HookEvent][]types.HookMatcher
-
-	// User sets the Unix user to run the CLI process as.
-	User *string
-
-	// IncludePartialMessages enables streaming of partial messages.
-	IncludePartialMessages bool
-
-	// ForkSession creates a new session when resuming instead of continuing.
-	ForkSession bool
-
-	// Agents defines custom agent configurations.
-	Agents map[string]types.AgentDefinition
-
-	// SettingSources specifies which setting sources to load.
-	SettingSources []types.SettingSource
-
-	// Sandbox configures bash command isolation.
-	Sandbox *types.SandboxSettings
-
-	// Plugins configures plugin directories.
-	Plugins []types.PluginConfig
-
-	// MaxThinkingTokens limits tokens for thinking blocks.
-	// Deprecated: Use Thinking instead for more control.
+	// MaxThinkingTokens limits thinking tokens.
+	//
+	// Deprecated: use Thinking, which takes precedence when both are set.
 	MaxThinkingTokens *int
 
-	// Thinking configures thinking/reasoning behavior.
+	// Thinking configures extended thinking behavior.
 	Thinking types.ThinkingConfig
 
-	// Effort sets the effort level for the model.
+	// Effort controls how much effort Claude puts into its response.
 	Effort *types.EffortLevel
 
-	// OutputFormat configures structured output format.
-	// Example: map[string]any{"type": "json_schema", "schema": ...}
+	// OutputFormat requests structured output, e.g.
+	// {"type": "json_schema", "schema": {...}}.
 	OutputFormat map[string]any
 
 	// Betas enables beta features.
 	Betas []types.SdkBeta
 
-	// EnableFileCheckpointing enables file checkpointing for rewind support.
-	EnableFileCheckpointing bool
+	// --- Session ------------------------------------------------------------
 
-	// MCPConfigPath specifies a path to an MCP config file.
-	MCPConfigPath *string
+	// ContinueConversation resumes the most recent conversation in Cwd.
+	ContinueConversation bool
 
-	// PersistSession controls whether sessions are saved to disk.
-	// When set to false, the --no-session-persistence flag is passed to the CLI.
-	// Default (nil) persists sessions normally.
+	// Resume loads history from a specific session ID.
+	Resume *string
+
+	// ResumeSessionAt resumes only up to and including this message UUID.
+	ResumeSessionAt *string
+
+	// SessionID pins a UUID for a new session instead of generating one.
+	SessionID *string
+
+	// ForkSession branches a resumed session to a new ID rather than
+	// continuing it.
+	ForkSession bool
+
+	// Title names a new session instead of auto-generating one. When
+	// resuming, the persisted title wins.
+	Title *string
+
+	// PersistSession controls whether sessions are written to disk.
+	// Nil persists normally.
 	PersistSession *bool
 
-	// AgentProgressSummaries enables AI-generated progress summaries for subagents.
+	// SessionStore mirrors session transcripts to external storage and lets
+	// Resume materialize from it when the local file is absent.
+	SessionStore SessionStore
+
+	// SessionStoreFlush controls how aggressively mirrored entries are
+	// flushed. Ignored when SessionStore is nil.
+	SessionStoreFlush types.SessionStoreFlushMode
+
+	// LoadTimeoutMS bounds each SessionStore load during resume
+	// materialization. Zero uses the default of 60s.
+	LoadTimeoutMS int
+
+	// --- MCP and plugins -----------------------------------------------------
+
+	// MCPServers configures MCP servers by name.
+	MCPServers map[string]types.MCPServerConfig
+
+	// MCPConfigPath points at an MCP config file. Used only when MCPServers
+	// is empty.
+	MCPConfigPath *string
+
+	// StrictMCPConfig uses only the servers in MCPServers, ignoring project
+	// .mcp.json, user settings, plugins, and agent frontmatter.
+	StrictMCPConfig bool
+
+	// Channels configures channel servers that push messages into the
+	// session. Research preview.
+	Channels map[string]types.ChannelServerConfig
+
+	// Plugins loads local plugins providing commands, agents, skills, hooks.
+	Plugins []types.PluginConfig
+
+	// --- Callbacks -----------------------------------------------------------
+
+	// Hooks configures callbacks for lifecycle events.
+	//
+	// Matchers registered on the same event are dispatched concurrently by
+	// the CLI, so each hook must be independent.
+	Hooks map[types.HookEvent][]types.HookMatcher
+
+	// OnElicitation handles MCP elicitation requests -- an MCP server asking
+	// for user input. Unhandled requests are declined automatically.
+	OnElicitation ElicitationCallback
+
+	// OnUserDialog renders blocking dialogs the CLI asks the host to display.
+	// Requires SupportedDialogKinds to be non-empty.
+	OnUserDialog UserDialogCallback
+
+	// SupportedDialogKinds declares which dialog kinds OnUserDialog can
+	// render. The CLI fails closed: an undeclared kind is never emitted.
+	SupportedDialogKinds []string
+
+	// Stderr receives stderr lines from the CLI process.
+	Stderr func(string)
+
+	// Warn receives advisory SDK warnings, such as a CanUseTool callback that
+	// other options will shadow. Nil logs to the standard logger once.
+	Warn func(string)
+
+	// --- Output stream --------------------------------------------------------
+
+	// IncludePartialMessages emits StreamEvent messages during streaming.
+	IncludePartialMessages bool
+
+	// IncludeHookEvents emits HookEventMessage entries for hook lifecycle.
+	IncludeHookEvents bool
+
+	// ForwardSubagentText forwards subagent text and thinking blocks, not
+	// just their tool calls, so a nested transcript can be rendered.
+	ForwardSubagentText bool
+
+	// PromptSuggestions emits a predicted next user prompt after each turn.
+	PromptSuggestions bool
+
+	// AgentProgressSummaries emits periodic AI-generated progress summaries
+	// for running subagents on task_progress events.
 	AgentProgressSummaries bool
 
-	// ToolConfig provides fine-grained per-tool configuration.
-	// Keys are tool names (e.g., "Bash", "Write").
-	ToolConfig map[string]types.ToolConfiguration
+	// --- Environment ----------------------------------------------------------
+
+	// Cwd sets the working directory for the CLI.
+	Cwd *string
+
+	// CLIPath overrides discovery of the claude binary.
+	CLIPath *string
+
+	// Settings is a settings JSON string or file path, loaded into the
+	// highest-priority user-controlled layer.
+	Settings *string
+
+	// ManagedSettings supplies policy-tier settings as a JSON string. Filtered
+	// restrictive-only, and dropped entirely when an admin managed-settings
+	// tier exists unless that admin opted in.
+	ManagedSettings *string
+
+	// SettingSources controls which filesystem settings load. Nil loads all
+	// sources (the CLI default); an empty non-nil slice disables them.
+	// Must include types.SettingSourceProject to load CLAUDE.md.
+	SettingSources []types.SettingSource
+
+	// AddDirs grants access to directories beyond Cwd.
+	AddDirs []string
+
+	// Sandbox configures bash command isolation.
+	Sandbox *types.SandboxSettings
+
+	// EnableFileCheckpointing tracks file changes so Client.RewindFiles can
+	// restore them.
+	EnableFileCheckpointing bool
+
+	// Env sets environment variables for the CLI process. Set
+	// CLAUDE_AGENT_SDK_CLIENT_APP to identify your app in the User-Agent.
+	Env map[string]string
+
+	// ExtraArgs passes arbitrary CLI flags. Nil values become bare flags.
+	ExtraArgs map[string]*string
+
+	// MaxBufferSize caps a single message read from CLI stdout.
+	// Zero uses 1 MiB.
+	MaxBufferSize *int
+
+	// User sets the Unix user to run the CLI process as.
+	User *string
+
+	// Debug enables verbose CLI debug logging.
+	Debug bool
+
+	// DebugFile writes debug logs to a path, implying Debug.
+	DebugFile *string
 }
 
-// effortToString converts an EffortLevel pointer to a string pointer for transport.
+// CanUseToolCallback decides whether a tool call may proceed.
+type CanUseToolCallback func(
+	ctx context.Context,
+	toolName string,
+	input map[string]any,
+	permissionCtx types.ToolPermissionContext,
+) (types.PermissionResult, error)
+
+// ElicitationCallback handles an MCP server's request for user input.
+type ElicitationCallback func(
+	ctx context.Context,
+	request types.ElicitationRequest,
+) (types.ElicitationResult, error)
+
+// UserDialogCallback renders a blocking dialog on the CLI's behalf.
+//
+// Return a cancelled result for a dialog kind you do not recognize; the CLI
+// then applies that dialog's default behavior.
+type UserDialogCallback func(
+	ctx context.Context,
+	request types.UserDialogRequest,
+) (types.UserDialogResult, error)
+
+// effortToString converts an EffortLevel pointer for transport.
 func effortToString(e *types.EffortLevel) *string {
 	if e == nil {
 		return nil
@@ -155,14 +307,6 @@ func effortToString(e *types.EffortLevel) *string {
 	return &s
 }
 
-// CanUseToolCallback is the function signature for tool permission callbacks.
-type CanUseToolCallback func(
-	ctx context.Context,
-	toolName string,
-	input map[string]any,
-	permissionCtx types.ToolPermissionContext,
-) (types.PermissionResult, error)
-
 // DefaultAgentOptions returns AgentOptions with sensible defaults.
 func DefaultAgentOptions() *AgentOptions {
 	return &AgentOptions{
@@ -170,6 +314,8 @@ func DefaultAgentOptions() *AgentOptions {
 		ExtraArgs: make(map[string]*string),
 	}
 }
+
+// --- Builder helpers --------------------------------------------------------
 
 // WithSystemPrompt sets the system prompt as a string.
 func (o *AgentOptions) WithSystemPrompt(prompt string) *AgentOptions {
@@ -183,9 +329,15 @@ func (o *AgentOptions) WithSystemPromptPreset(preset types.SystemPromptPreset) *
 	return o
 }
 
+// WithSystemPromptFile loads the system prompt from a file.
+func (o *AgentOptions) WithSystemPromptFile(path string) *AgentOptions {
+	o.SystemPrompt = &types.SystemPromptFile{Type: "file", Path: path}
+	return o
+}
+
 // WithAppendSystemPrompt appends to the default system prompt.
-func (o *AgentOptions) WithAppendSystemPrompt(append string) *AgentOptions {
-	o.AppendSystemPrompt = &append
+func (o *AgentOptions) WithAppendSystemPrompt(text string) *AgentOptions {
+	o.AppendSystemPrompt = &text
 	return o
 }
 
@@ -216,6 +368,12 @@ func (o *AgentOptions) WithCLIPath(path string) *AgentOptions {
 // WithModel sets the model to use.
 func (o *AgentOptions) WithModel(model string) *AgentOptions {
 	o.Model = &model
+	return o
+}
+
+// WithAgent runs the main thread as a named agent.
+func (o *AgentOptions) WithAgent(name string) *AgentOptions {
+	o.Agent = &name
 	return o
 }
 
@@ -289,18 +447,46 @@ func (o *AgentOptions) WithNoPersistSession() *AgentOptions {
 	return o
 }
 
-// WithAgentProgressSummaries enables AI-generated progress summaries for subagents.
+// WithAgentProgressSummaries enables progress summaries for subagents.
 func (o *AgentOptions) WithAgentProgressSummaries() *AgentOptions {
 	o.AgentProgressSummaries = true
 	return o
 }
 
-// WithToolConfig sets configuration for a specific tool.
-func (o *AgentOptions) WithToolConfig(name string, config types.ToolConfiguration) *AgentOptions {
+// WithToolConfig sets per-tool configuration for built-in tools.
+func (o *AgentOptions) WithToolConfig(config types.ToolConfig) *AgentOptions {
+	o.ToolConfig = &config
+	return o
+}
+
+// WithAskUserQuestionPreviewFormat sets the content format for AskUserQuestion
+// option previews. Use types.PreviewFormatHTML for web-based consumers.
+func (o *AgentOptions) WithAskUserQuestionPreviewFormat(format types.PreviewFormat) *AgentOptions {
 	if o.ToolConfig == nil {
-		o.ToolConfig = make(map[string]types.ToolConfiguration)
+		o.ToolConfig = &types.ToolConfig{}
 	}
-	o.ToolConfig[name] = config
+	if o.ToolConfig.AskUserQuestion == nil {
+		o.ToolConfig.AskUserQuestion = &types.AskUserQuestionConfig{}
+	}
+	o.ToolConfig.AskUserQuestion.PreviewFormat = &format
+	return o
+}
+
+// WithSkills enables the named skills.
+func (o *AgentOptions) WithSkills(names ...string) *AgentOptions {
+	o.Skills = names
+	return o
+}
+
+// WithAllSkills enables every discovered skill.
+func (o *AgentOptions) WithAllSkills() *AgentOptions {
+	o.Skills = types.SkillsAll
+	return o
+}
+
+// WithSessionStore mirrors transcripts to an external store.
+func (o *AgentOptions) WithSessionStore(store SessionStore) *AgentOptions {
+	o.SessionStore = store
 	return o
 }
 
@@ -313,12 +499,11 @@ func (o *AgentOptions) WithEnv(key, value string) *AgentOptions {
 	return o
 }
 
-// cloneTools clones the Tools field which can be []string or *types.ToolsPreset.
+// cloneTools copies the Tools field, which may be []string or a preset.
 func cloneTools(tools any) any {
-	if tools == nil {
-		return nil
-	}
 	switch t := tools.(type) {
+	case nil:
+		return nil
 	case []string:
 		if t == nil {
 			return nil
@@ -329,117 +514,108 @@ func cloneTools(tools any) any {
 	}
 }
 
+// cloneSkills copies the Skills field, which may be []string or SkillsAll.
+func cloneSkills(skills any) any {
+	if s, ok := skills.([]string); ok {
+		if s == nil {
+			return nil
+		}
+		return append([]string{}, s...)
+	}
+	return skills
+}
+
 // Clone creates a copy of the AgentOptions.
+//
+// Slices and maps are copied so a clone cannot be mutated through the
+// original. Callback and interface fields are shared by reference.
 func (o *AgentOptions) Clone() *AgentOptions {
 	if o == nil {
 		return nil
 	}
 
-	// Helper to clone string slices while preserving nil vs empty distinction
-	cloneStringSlice := func(s []string) []string {
+	cloneStrings := func(s []string) []string {
 		if s == nil {
 			return nil
 		}
 		return append([]string{}, s...)
 	}
 
-	clone := &AgentOptions{
-		Tools:                    cloneTools(o.Tools),
-		AllowedTools:             cloneStringSlice(o.AllowedTools),
-		DisallowedTools:          cloneStringSlice(o.DisallowedTools),
-		SystemPrompt:             o.SystemPrompt, // *string or *SystemPromptPreset, both are safe to share
-		AppendSystemPrompt:       o.AppendSystemPrompt,
-		PermissionMode:           o.PermissionMode,
-		ContinueConversation:     o.ContinueConversation,
-		Resume:                   o.Resume,
-		MaxTurns:                 o.MaxTurns,
-		MaxBudgetUSD:             o.MaxBudgetUSD,
-		Model:                    o.Model,
-		FallbackModel:            o.FallbackModel,
-		PermissionPromptToolName: o.PermissionPromptToolName,
-		Cwd:                      o.Cwd,
-		CLIPath:                  o.CLIPath,
-		Settings:                 o.Settings,
-		AddDirs:                  cloneStringSlice(o.AddDirs),
-		MaxBufferSize:            o.MaxBufferSize,
-		Stderr:                   o.Stderr,
-		CanUseTool:               o.CanUseTool,
-		User:                     o.User,
-		IncludePartialMessages:   o.IncludePartialMessages,
-		ForkSession:              o.ForkSession,
-		SettingSources:           append([]types.SettingSource{}, o.SettingSources...),
-		Sandbox:                  o.Sandbox,
-		Plugins:                  append([]types.PluginConfig{}, o.Plugins...),
-		MaxThinkingTokens:        o.MaxThinkingTokens,
-		Thinking:                 o.Thinking,
-		Effort:                   o.Effort,
-		EnableFileCheckpointing:  o.EnableFileCheckpointing,
-		MCPConfigPath:            o.MCPConfigPath,
-		PersistSession:           o.PersistSession,
-		AgentProgressSummaries:   o.AgentProgressSummaries,
-	}
+	clone := *o
 
-	// Clone Betas
+	clone.Tools = cloneTools(o.Tools)
+	clone.Skills = cloneSkills(o.Skills)
+	clone.AllowedTools = cloneStrings(o.AllowedTools)
+	clone.DisallowedTools = cloneStrings(o.DisallowedTools)
+	clone.AddDirs = cloneStrings(o.AddDirs)
+	clone.SupportedDialogKinds = cloneStrings(o.SupportedDialogKinds)
+
+	if o.SettingSources != nil {
+		clone.SettingSources = append([]types.SettingSource{}, o.SettingSources...)
+	}
+	if o.Plugins != nil {
+		clone.Plugins = append([]types.PluginConfig{}, o.Plugins...)
+	}
 	if o.Betas != nil {
 		clone.Betas = append([]types.SdkBeta{}, o.Betas...)
 	}
 
-	// Deep copy maps
 	if o.MCPServers != nil {
-		clone.MCPServers = make(map[string]types.MCPServerConfig)
+		clone.MCPServers = make(map[string]types.MCPServerConfig, len(o.MCPServers))
 		for k, v := range o.MCPServers {
 			clone.MCPServers[k] = v
 		}
 	}
-
 	if o.Channels != nil {
-		clone.Channels = make(map[string]types.ChannelServerConfig)
+		clone.Channels = make(map[string]types.ChannelServerConfig, len(o.Channels))
 		for k, v := range o.Channels {
 			clone.Channels[k] = v
 		}
 	}
-
 	if o.Env != nil {
-		clone.Env = make(map[string]string)
+		clone.Env = make(map[string]string, len(o.Env))
 		for k, v := range o.Env {
 			clone.Env[k] = v
 		}
 	}
-
+	if o.ToolAliases != nil {
+		clone.ToolAliases = make(map[string]string, len(o.ToolAliases))
+		for k, v := range o.ToolAliases {
+			clone.ToolAliases[k] = v
+		}
+	}
 	if o.ExtraArgs != nil {
-		clone.ExtraArgs = make(map[string]*string)
+		clone.ExtraArgs = make(map[string]*string, len(o.ExtraArgs))
 		for k, v := range o.ExtraArgs {
 			clone.ExtraArgs[k] = v
 		}
 	}
-
 	if o.Hooks != nil {
-		clone.Hooks = make(map[types.HookEvent][]types.HookMatcher)
+		clone.Hooks = make(map[types.HookEvent][]types.HookMatcher, len(o.Hooks))
 		for k, v := range o.Hooks {
 			clone.Hooks[k] = append([]types.HookMatcher{}, v...)
 		}
 	}
-
 	if o.Agents != nil {
-		clone.Agents = make(map[string]types.AgentDefinition)
+		clone.Agents = make(map[string]types.AgentDefinition, len(o.Agents))
 		for k, v := range o.Agents {
 			clone.Agents[k] = v
 		}
 	}
-
 	if o.OutputFormat != nil {
-		clone.OutputFormat = make(map[string]any)
+		clone.OutputFormat = make(map[string]any, len(o.OutputFormat))
 		for k, v := range o.OutputFormat {
 			clone.OutputFormat[k] = v
 		}
 	}
-
 	if o.ToolConfig != nil {
-		clone.ToolConfig = make(map[string]types.ToolConfiguration)
-		for k, v := range o.ToolConfig {
-			clone.ToolConfig[k] = v
+		tc := *o.ToolConfig
+		if o.ToolConfig.AskUserQuestion != nil {
+			aq := *o.ToolConfig.AskUserQuestion
+			tc.AskUserQuestion = &aq
 		}
+		clone.ToolConfig = &tc
 	}
 
-	return clone
+	return &clone
 }

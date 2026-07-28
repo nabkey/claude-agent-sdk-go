@@ -30,11 +30,11 @@ type SDKControlInterruptRequest struct {
 
 // SDKControlPermissionRequest is a request for tool permission.
 type SDKControlPermissionRequest struct {
-	Subtype               string               `json:"subtype"` // "can_use_tool"
-	ToolName              string               `json:"tool_name"`
-	Input                 map[string]any       `json:"input"`
-	PermissionSuggestions []PermissionUpdate   `json:"permission_suggestions,omitempty"`
-	BlockedPath           *string              `json:"blocked_path,omitempty"`
+	Subtype               string             `json:"subtype"` // "can_use_tool"
+	ToolName              string             `json:"tool_name"`
+	Input                 map[string]any     `json:"input"`
+	PermissionSuggestions []PermissionUpdate `json:"permission_suggestions,omitempty"`
+	BlockedPath           *string            `json:"blocked_path,omitempty"`
 }
 
 // SDKControlInitializeRequest is a request to initialize the control protocol.
@@ -124,9 +124,9 @@ type MCPJSONRPCRequest struct {
 
 // MCPJSONRPCResponse represents a JSON-RPC response from an MCP server.
 type MCPJSONRPCResponse struct {
-	JSONRPC string         `json:"jsonrpc"` // "2.0"
-	ID      any            `json:"id,omitempty"`
-	Result  map[string]any `json:"result,omitempty"`
+	JSONRPC string           `json:"jsonrpc"` // "2.0"
+	ID      any              `json:"id,omitempty"`
+	Result  map[string]any   `json:"result,omitempty"`
 	Error   *MCPJSONRPCError `json:"error,omitempty"`
 }
 

@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/nabkey/claude-agent-sdk-go/errors"
 	"github.com/nabkey/claude-agent-sdk-go/types"
@@ -21,12 +23,18 @@ import (
 const (
 	defaultMaxBufferSize     = 1024 * 1024 // 1MB
 	minimumClaudeCodeVersion = "2.0.0"
+
+	// gracefulShutdownTimeout bounds each stage of the stdin-EOF -> SIGTERM ->
+	// SIGKILL escalation in Close.
+	gracefulShutdownTimeout = 5 * time.Second
+
+	// stderrTailLines is how many trailing stderr lines are retained to
+	// enrich a ProcessError.
+	stderrTailLines = 20
 )
 
 // SubprocessTransport implements Transport using the Claude CLI as a subprocess.
 type SubprocessTransport struct {
-	prompt        string
-	isStreaming   bool
 	options       *SubprocessOptions
 	cliPath       string
 	cwd           string
@@ -40,6 +48,16 @@ type SubprocessTransport struct {
 	writeMu       sync.Mutex
 	closeMu       sync.Mutex
 	closed        bool
+
+	// waitOnce guards cmd.Wait, which must be called exactly once but is
+	// reached from both the read loop and Close.
+	waitOnce sync.Once
+	waitErr  error
+
+	// stderrMu guards the tail buffer used to enrich ProcessError.
+	stderrMu   sync.Mutex
+	stderrTail []string
+	stderrDone chan struct{}
 }
 
 // SubprocessOptions contains configuration for the subprocess transport.
@@ -97,7 +115,7 @@ type SubprocessOptions struct {
 	// MaxThinkingTokens limits thinking tokens.
 	MaxThinkingTokens *int
 	// Thinking configures thinking behavior.
-	Thinking any
+	Thinking types.ThinkingConfig
 	// Effort sets effort level.
 	Effort *string
 	// OutputFormat configures structured output.
@@ -124,16 +142,48 @@ type SubprocessOptions struct {
 	Hooks map[types.HookEvent][]types.HookMatcher
 	// PersistSession controls whether sessions are saved to disk.
 	PersistSession *bool
-	// AgentProgressSummaries enables progress summaries for subagents.
-	AgentProgressSummaries bool
-	// ToolConfig provides per-tool configuration.
-	ToolConfig map[string]types.ToolConfiguration
+	// ToolConfig provides per-tool configuration. Delivered via the
+	// subprocess environment, not as a CLI flag.
+	ToolConfig *types.ToolConfig
+
+	// TaskBudget is the API-side task budget in tokens.
+	TaskBudget *types.TaskBudget
+	// Agent runs the main thread as a named agent.
+	Agent *string
+	// AllowDangerouslySkipPermissions accompanies bypassPermissions mode.
+	AllowDangerouslySkipPermissions bool
+	// ResumeSessionAt resumes only up to this message UUID.
+	ResumeSessionAt *string
+	// SessionID pins a session UUID.
+	SessionID *string
+	// ManagedSettings supplies policy-tier settings as JSON.
+	ManagedSettings *string
+	// StrictMCPConfig ignores MCP configuration outside MCPServers.
+	StrictMCPConfig bool
+	// IncludeHookEvents emits hook lifecycle events into the stream.
+	IncludeHookEvents bool
+	// Skills is []string or types.SkillsAll. A list also injects
+	// Skill(name) allow entries; both forms default SettingSources.
+	Skills any
+	// SessionStore enables transcript mirroring (--session-mirror).
+	SessionStore bool
+	// Debug enables verbose CLI logging.
+	Debug bool
+	// DebugFile writes debug logs to a path, implying Debug.
+	DebugFile *string
 }
 
-// NewSubprocessTransport creates a new subprocess transport.
-func NewSubprocessTransport(prompt string, isStreaming bool, opts *SubprocessOptions) (*SubprocessTransport, error) {
+// NewSubprocessTransport creates a transport that spawns the Claude CLI.
+//
+// The CLI is always run in streaming mode, so the prompt is written to stdin
+// after the initialize handshake rather than baked into argv.
+func NewSubprocessTransport(opts *SubprocessOptions) (*SubprocessTransport, error) {
 	if opts == nil {
 		opts = &SubprocessOptions{}
+	}
+
+	if err := validateOptions(opts); err != nil {
+		return nil, err
 	}
 
 	cliPath := ""
@@ -147,6 +197,11 @@ func NewSubprocessTransport(prompt string, isStreaming bool, opts *SubprocessOpt
 		}
 	}
 
+	// Validate the resolved CLI before anything is spawned with it.
+	if err := rejectWindowsBatchCLI(cliPath); err != nil {
+		return nil, err
+	}
+
 	cwd := ""
 	if opts.Cwd != nil {
 		cwd = *opts.Cwd
@@ -158,8 +213,6 @@ func NewSubprocessTransport(prompt string, isStreaming bool, opts *SubprocessOpt
 	}
 
 	return &SubprocessTransport{
-		prompt:        prompt,
-		isStreaming:   isStreaming,
 		options:       opts,
 		cliPath:       cliPath,
 		cwd:           cwd,
@@ -202,45 +255,111 @@ func findCLI() (string, error) {
 	)
 }
 
+// appendFlagValue appends a --flag/value pair, using the `--flag=value` form
+// when the value begins with a dash.
+//
+// Several CLI options are declared with an *optional* value. In the two-token
+// form a dash-leading value is not bound to its flag and is instead parsed as a
+// separate flag, letting an untrusted value inject arbitrary CLI flags. The
+// equals form always binds the value to the flag.
+func appendFlagValue(cmd []string, flag, value string) []string {
+	if len(value) > 1 && strings.HasPrefix(value, "-") {
+		return append(cmd, fmt.Sprintf("--%s=%s", flag, value))
+	}
+	return append(cmd, fmt.Sprintf("--%s", flag), value)
+}
+
+// applySkillsDefaults computes the effective allowed tools and setting sources
+// for the configured skills.
+//
+// Skills is the single option a caller needs: types.SkillsAll injects the bare
+// Skill tool, a list injects Skill(name) per entry, and either form defaults
+// SettingSources to user+project so the CLI can discover the skills on disk.
+// A nil Skills is a no-op.
+func (t *SubprocessTransport) applySkillsDefaults() ([]string, []types.SettingSource) {
+	opts := t.options
+
+	allowed := append([]string{}, opts.AllowedTools...)
+	sources := opts.SettingSources
+
+	if opts.Skills == nil {
+		return allowed, sources
+	}
+
+	contains := func(needle string) bool {
+		for _, v := range allowed {
+			if v == needle {
+				return true
+			}
+		}
+		return false
+	}
+
+	switch skills := opts.Skills.(type) {
+	case string:
+		if skills == types.SkillsAll && !contains("Skill") {
+			allowed = append(allowed, "Skill")
+		}
+	case []string:
+		for _, name := range skills {
+			if pattern := fmt.Sprintf("Skill(%s)", name); !contains(pattern) {
+				allowed = append(allowed, pattern)
+			}
+		}
+	}
+
+	if sources == nil {
+		sources = []types.SettingSource{types.SettingSourceUser, types.SettingSourceProject}
+	}
+	return allowed, sources
+}
+
 // buildCommand constructs the CLI command with arguments.
 func (t *SubprocessTransport) buildCommand() []string {
 	cmd := []string{t.cliPath, "--output-format", "stream-json", "--verbose"}
 
 	opts := t.options
 
-	// System prompt handling
+	// System prompt. The block form and the preset's append/exclude fields
+	// travel on the initialize request instead; only the file variant and a
+	// plain string have flags.
 	switch sp := opts.SystemPrompt.(type) {
 	case *string:
 		cmd = append(cmd, "--system-prompt", *sp)
+	case *types.SystemPromptFile:
+		cmd = append(cmd, "--system-prompt-file", sp.Path)
 	case *types.SystemPromptPreset:
-		spJSON, _ := json.Marshal(sp)
-		cmd = append(cmd, "--system-prompt", string(spJSON))
+		// A preset means "use the CLI's own system prompt", which is the
+		// default when the flag is absent.
+	case []string:
+		// Block form is sent via initialize so the cache boundary survives.
 	case nil:
-		if opts.AppendSystemPrompt != nil {
-			cmd = append(cmd, "--append-system-prompt", *opts.AppendSystemPrompt)
-		} else {
+		// No system prompt configured: blank it so the CLI does not apply
+		// its default, unless the caller only wants to append.
+		if opts.AppendSystemPrompt == nil {
 			cmd = append(cmd, "--system-prompt", "")
 		}
 	}
-	if opts.SystemPrompt != nil && opts.AppendSystemPrompt != nil {
+	if opts.AppendSystemPrompt != nil {
 		cmd = append(cmd, "--append-system-prompt", *opts.AppendSystemPrompt)
 	}
 
-	// Tools
-	switch t := opts.Tools.(type) {
+	// Tools. A preset maps to the literal "default"; the CLI does not accept
+	// a JSON-encoded preset object here.
+	switch tools := opts.Tools.(type) {
 	case []string:
-		if len(t) == 0 {
+		if len(tools) == 0 {
 			cmd = append(cmd, "--tools", "")
 		} else {
-			cmd = append(cmd, "--tools", strings.Join(t, ","))
+			cmd = append(cmd, "--tools", strings.Join(tools, ","))
 		}
 	case *types.ToolsPreset:
-		toolsJSON, _ := json.Marshal(t)
-		cmd = append(cmd, "--tools", string(toolsJSON))
+		cmd = append(cmd, "--tools", "default")
 	}
 
-	if len(opts.AllowedTools) > 0 {
-		cmd = append(cmd, "--allowedTools", strings.Join(opts.AllowedTools, ","))
+	effectiveAllowed, effectiveSources := t.applySkillsDefaults()
+	if len(effectiveAllowed) > 0 {
+		cmd = append(cmd, "--allowedTools", strings.Join(effectiveAllowed, ","))
 	}
 
 	if opts.MaxTurns != nil {
@@ -249,6 +368,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.MaxBudgetUSD != nil {
 		cmd = append(cmd, "--max-budget-usd", fmt.Sprintf("%f", *opts.MaxBudgetUSD))
+	}
+
+	if opts.TaskBudget != nil {
+		cmd = append(cmd, "--task-budget", fmt.Sprintf("%d", opts.TaskBudget.Total))
 	}
 
 	if len(opts.DisallowedTools) > 0 {
@@ -261,6 +384,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.FallbackModel != nil {
 		cmd = append(cmd, "--fallback-model", *opts.FallbackModel)
+	}
+
+	if opts.Agent != nil {
+		cmd = append(cmd, "--agent", *opts.Agent)
 	}
 
 	if len(opts.Betas) > 0 {
@@ -279,12 +406,26 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--permission-mode", string(*opts.PermissionMode))
 	}
 
+	if opts.AllowDangerouslySkipPermissions {
+		cmd = append(cmd, "--allow-dangerously-skip-permissions")
+	}
+
 	if opts.ContinueConversation {
 		cmd = append(cmd, "--continue")
 	}
 
+	// Bind with `=` so a dash-leading session title cannot inject CLI flags:
+	// --resume takes an optional value, so the two-token form would not bind.
 	if opts.Resume != nil {
-		cmd = append(cmd, "--resume", *opts.Resume)
+		cmd = append(cmd, fmt.Sprintf("--resume=%s", *opts.Resume))
+	}
+
+	if opts.ResumeSessionAt != nil {
+		cmd = append(cmd, fmt.Sprintf("--resume-session-at=%s", *opts.ResumeSessionAt))
+	}
+
+	if opts.SessionID != nil {
+		cmd = append(cmd, fmt.Sprintf("--session-id=%s", *opts.SessionID))
 	}
 
 	// Settings and sandbox handling
@@ -333,82 +474,111 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--include-partial-messages")
 	}
 
+	if opts.IncludeHookEvents {
+		cmd = append(cmd, "--include-hook-events")
+	}
+
+	if opts.StrictMCPConfig {
+		cmd = append(cmd, "--strict-mcp-config")
+	}
+
+	if opts.SessionStore {
+		cmd = append(cmd, "--session-mirror")
+	}
+
+	if opts.ManagedSettings != nil {
+		cmd = append(cmd, "--managed-settings", *opts.ManagedSettings)
+	}
+
+	// --debug-file implies debug, so the two are mutually exclusive on argv.
+	if opts.DebugFile != nil {
+		cmd = append(cmd, "--debug-file", *opts.DebugFile)
+	} else if opts.Debug {
+		cmd = append(cmd, "--debug")
+	}
+
 	if opts.ForkSession {
 		cmd = append(cmd, "--fork-session")
 	}
 
-	// Agents
-	if len(opts.Agents) > 0 {
-		agentsMap := make(map[string]any)
-		for name, agent := range opts.Agents {
-			agentMap := map[string]any{
-				"description": agent.Description,
-				"prompt":      agent.Prompt,
-			}
-			if agent.Tools != nil {
-				agentMap["tools"] = agent.Tools
-			}
-			if agent.Model != nil {
-				agentMap["model"] = *agent.Model
-			}
-			if agent.Skills != nil {
-				agentMap["skills"] = agent.Skills
-			}
-			if agent.Memory != nil {
-				agentMap["memory"] = *agent.Memory
-			}
-			if agent.MCPServers != nil {
-				agentMap["mcpServers"] = agent.MCPServers
-			}
-			agentsMap[name] = agentMap
-		}
-		agentsJSON, _ := json.Marshal(agentsMap)
-		cmd = append(cmd, "--agents", string(agentsJSON))
-	}
+	// Agents travel on the initialize control request, not as a flag: the
+	// payload can be large and several of its fields have no flag equivalent.
 
-	// Setting sources
-	sourcesValue := ""
-	if opts.SettingSources != nil {
-		sources := make([]string, len(opts.SettingSources))
-		for i, s := range opts.SettingSources {
+	// Setting sources. Only emitted when explicitly configured: omitting the
+	// flag lets the CLI load all sources (its default), whereas passing an
+	// empty value disables filesystem settings entirely. A nil slice must
+	// therefore not produce a flag, while an empty non-nil slice must.
+	if effectiveSources != nil {
+		sources := make([]string, len(effectiveSources))
+		for i, s := range effectiveSources {
 			sources[i] = string(s)
 		}
-		sourcesValue = strings.Join(sources, ",")
+		cmd = append(cmd, fmt.Sprintf("--setting-sources=%s", strings.Join(sources, ",")))
 	}
-	cmd = append(cmd, "--setting-sources", sourcesValue)
 
 	// Plugins
 	for _, plugin := range opts.Plugins {
-		if plugin.Type == "local" {
-			cmd = append(cmd, "--plugin-dir", plugin.Path)
+		if plugin.Type != "local" {
+			continue
 		}
+		flag := "--plugin-dir"
+		if plugin.SkipMCPDiscovery {
+			flag = "--plugin-dir-no-mcp"
+		}
+		cmd = append(cmd, flag, plugin.Path)
 	}
 
-	// Extra args
-	for flag, value := range opts.ExtraArgs {
+	// Extra args. Sort for deterministic argv ordering across runs.
+	extraFlags := make([]string, 0, len(opts.ExtraArgs))
+	for flag := range opts.ExtraArgs {
+		extraFlags = append(extraFlags, flag)
+	}
+	sort.Strings(extraFlags)
+	for _, flag := range extraFlags {
+		value := opts.ExtraArgs[flag]
 		if value == nil {
 			cmd = append(cmd, fmt.Sprintf("--%s", flag))
 		} else {
-			cmd = append(cmd, fmt.Sprintf("--%s", flag), *value)
+			cmd = appendFlagValue(cmd, flag, *value)
 		}
 	}
 
-	if opts.MaxThinkingTokens != nil {
-		cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *opts.MaxThinkingTokens))
-	}
-
+	// Thinking configuration. `Thinking` takes precedence over the deprecated
+	// `MaxThinkingTokens`. The CLI models this as two separate flags rather
+	// than a single JSON payload:
+	//
+	//   adaptive              -> --thinking adaptive
+	//   enabled w/ budget     -> --max-thinking-tokens N
+	//   enabled w/o budget    -> --thinking adaptive
+	//   disabled              -> --thinking disabled
 	if opts.Thinking != nil {
-		thinkingJSON, _ := json.Marshal(opts.Thinking)
-		cmd = append(cmd, "--thinking", string(thinkingJSON))
+		switch cfg := opts.Thinking.(type) {
+		case *types.ThinkingConfigAdaptive:
+			cmd = append(cmd, "--thinking", "adaptive")
+		case *types.ThinkingConfigEnabled:
+			if cfg.BudgetTokens != nil {
+				cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *cfg.BudgetTokens))
+			} else {
+				cmd = append(cmd, "--thinking", "adaptive")
+			}
+		case *types.ThinkingConfigDisabled:
+			cmd = append(cmd, "--thinking", "disabled")
+		}
+		if display := opts.Thinking.DisplayMode(); display != nil {
+			cmd = append(cmd, "--thinking-display", string(*display))
+		}
+	} else if opts.MaxThinkingTokens != nil {
+		cmd = append(cmd, "--max-thinking-tokens", fmt.Sprintf("%d", *opts.MaxThinkingTokens))
 	}
 
 	if opts.Effort != nil {
 		cmd = append(cmd, "--effort", *opts.Effort)
 	}
 
-	if opts.EnableFileCheckpointing {
-		cmd = append(cmd, "--enable-file-checkpointing")
-	}
+	// Note: file checkpointing, per-tool config, and agent progress summaries
+	// are NOT CLI flags. Checkpointing and tool config are delivered through
+	// the subprocess environment (see buildEnv); agent progress summaries are
+	// sent as a field on the initialize control request.
 
 	// MCPConfigPath is only used when MCPServers is not set
 	if opts.MCPConfigPath != nil && len(opts.MCPServers) == 0 {
@@ -417,15 +587,6 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.PersistSession != nil && !*opts.PersistSession {
 		cmd = append(cmd, "--no-session-persistence")
-	}
-
-	if opts.AgentProgressSummaries {
-		cmd = append(cmd, "--agent-progress-summaries")
-	}
-
-	if len(opts.ToolConfig) > 0 {
-		tcJSON, _ := json.Marshal(opts.ToolConfig)
-		cmd = append(cmd, "--tool-config", string(tcJSON))
 	}
 
 	// Output format / JSON schema
@@ -438,12 +599,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 		}
 	}
 
-	// Input handling - must come after all flags
-	if t.isStreaming {
-		cmd = append(cmd, "--input-format", "stream-json")
-	} else {
-		cmd = append(cmd, "--print", "--", t.prompt)
-	}
+	// Input always arrives on stdin as stream-json. The alternative --print
+	// mode cannot carry the control protocol, so hooks, permission callbacks
+	// and in-process MCP servers would all silently stop working.
+	cmd = append(cmd, "--input-format", "stream-json")
 
 	return cmd
 }
@@ -486,6 +645,69 @@ func (t *SubprocessTransport) buildSettingsValue() string {
 	return string(result)
 }
 
+// buildEnv assembles the subprocess environment.
+//
+// Several options are configured through the environment rather than through
+// CLI flags: file checkpointing and the AskUserQuestion preview format have no
+// corresponding flag on the CLI.
+//
+// Precedence, lowest to highest: the inherited process environment, the SDK's
+// default entrypoint marker, caller-supplied Env, then SDK-controlled values
+// that must not be overridden.
+func (t *SubprocessTransport) buildEnv() []string {
+	opts := t.options
+
+	env := make(map[string]string, len(os.Environ())+8)
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		// CLAUDECODE marks a process as running *inside* Claude Code. An
+		// SDK-spawned subprocess is not, and inheriting it makes the CLI
+		// misbehave as if nested.
+		if k == "CLAUDECODE" {
+			continue
+		}
+		env[k] = v
+	}
+
+	// Default entrypoint marker; callers may override it via Env.
+	env["CLAUDE_CODE_ENTRYPOINT"] = "sdk-go"
+
+	for k, v := range opts.Env {
+		env[k] = v
+	}
+
+	// SDK-controlled values. These are applied after caller Env so the
+	// transport's own configuration cannot be silently disabled.
+	env["CLAUDE_AGENT_SDK_VERSION"] = Version
+	if opts.EnableFileCheckpointing {
+		env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "true"
+	}
+	if opts.ToolConfig != nil &&
+		opts.ToolConfig.AskUserQuestion != nil &&
+		opts.ToolConfig.AskUserQuestion.PreviewFormat != nil {
+		env["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] = string(*opts.ToolConfig.AskUserQuestion.PreviewFormat)
+	}
+	if t.cwd != "" {
+		env["PWD"] = t.cwd
+	}
+
+	// Flatten deterministically so argv/env dumps are stable across runs.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	result := make([]string, 0, len(keys))
+	for _, k := range keys {
+		result = append(result, k+"="+env[k])
+	}
+	return result
+}
+
 // Connect starts the subprocess and prepares for communication.
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	t.closeMu.Lock()
@@ -503,18 +725,7 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	cmdArgs := t.buildCommand()
 	t.cmd = exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 
-	// Set up environment
-	env := os.Environ()
-	if t.options.Env != nil {
-		for k, v := range t.options.Env {
-			env = append(env, fmt.Sprintf("%s=%s", k, v))
-		}
-	}
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
-	if t.cwd != "" {
-		env = append(env, fmt.Sprintf("PWD=%s", t.cwd))
-	}
-	t.cmd.Env = env
+	t.cmd.Env = t.buildEnv()
 
 	if t.cwd != "" {
 		t.cmd.Dir = t.cwd
@@ -553,33 +764,57 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		)
 	}
 
-	// Handle stderr in background
-	go t.handleStderr()
+	registerChild(t)
 
-	// For non-streaming mode, close stdin immediately
-	if !t.isStreaming {
-		_ = t.stdin.Close()
-		t.stdin = nil
-	}
+	// Handle stderr in background
+	t.stderrDone = make(chan struct{})
+	go t.handleStderr()
 
 	t.ready = true
 	return nil
 }
 
-// handleStderr reads stderr and invokes callbacks.
+// handleStderr reads stderr, invoking the callback and retaining a tail for
+// error enrichment.
 func (t *SubprocessTransport) handleStderr() {
+	defer close(t.stderrDone)
+
 	if t.stderr == nil {
 		return
 	}
 
-	scanner := bufio.NewScanner(t.stderr)
-	for scanner.Scan() {
-		line := scanner.Text()
+	emit := func(line string) {
+		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
-			continue
+			return
 		}
-		if t.options.Stderr != nil {
+
+		t.stderrMu.Lock()
+		t.stderrTail = append(t.stderrTail, line)
+		if len(t.stderrTail) > stderrTailLines {
+			t.stderrTail = t.stderrTail[len(t.stderrTail)-stderrTailLines:]
+		}
+		t.stderrMu.Unlock()
+
+		if t.options.Stderr == nil {
+			return
+		}
+		// Isolate per line: a panic in the caller's callback must not kill the
+		// reader and silently drop every subsequent line.
+		func() {
+			defer func() { _ = recover() }()
 			t.options.Stderr(line)
+		}()
+	}
+
+	reader := bufio.NewReaderSize(t.stderr, 32*1024)
+	for {
+		line, err := readLine(reader, t.maxBufferSize)
+		if line != "" {
+			emit(line)
+		}
+		if err != nil {
+			return
 		}
 	}
 }
@@ -615,6 +850,12 @@ func (t *SubprocessTransport) Write(ctx context.Context, data string) error {
 }
 
 // ReadMessages returns channels for messages and errors from stdout.
+//
+// The CLI writes NDJSON: exactly one JSON message per line. Lines are framed on
+// "\n" and parsed independently -- a line that fails to parse is a corrupt
+// message, not a partial one, so it is reported rather than concatenated onto
+// the next line. Concatenating would let a single stray line (some CLI builds
+// write "[SandboxDebug] ..." to stdout) poison every subsequent message.
 func (t *SubprocessTransport) ReadMessages(ctx context.Context) (<-chan map[string]any, <-chan error) {
 	msgChan := make(chan map[string]any, 100)
 	errChan := make(chan error, 1)
@@ -628,73 +869,129 @@ func (t *SubprocessTransport) ReadMessages(ctx context.Context) (<-chan map[stri
 			return
 		}
 
-		scanner := bufio.NewScanner(t.stdout)
-		scanner.Buffer(make([]byte, t.maxBufferSize), t.maxBufferSize)
+		reader := bufio.NewReaderSize(t.stdout, 64*1024)
 
-		var jsonBuffer strings.Builder
+		emit := func(line string) bool {
+			data, err := parseStdoutLine(line, t.maxBufferSize)
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return true
+			}
+			if data == nil {
+				return true
+			}
+			select {
+			case msgChan <- data:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 
-		for scanner.Scan() {
+		var readErr error
+		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
 
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-
-			// Handle potential partial JSON
-			jsonBuffer.WriteString(line)
-
-			if jsonBuffer.Len() > t.maxBufferSize {
-				errChan <- errors.NewCLIJSONDecodeError(
-					fmt.Sprintf("Buffer size %d exceeds limit %d", jsonBuffer.Len(), t.maxBufferSize),
-					nil,
-				)
-				jsonBuffer.Reset()
-				continue
-			}
-
-			var data map[string]any
-			if err := json.Unmarshal([]byte(jsonBuffer.String()), &data); err != nil {
-				// Not yet complete JSON, continue accumulating
-				continue
-			}
-
-			jsonBuffer.Reset()
-
-			select {
-			case msgChan <- data:
-			case <-ctx.Done():
-				return
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			errChan <- errors.NewCLIConnectionError("Error reading stdout", err)
-		}
-
-		// Wait for process to complete
-		if t.cmd != nil {
-			if err := t.cmd.Wait(); err != nil {
-				exitCode := -1
-				if t.cmd.ProcessState != nil {
-					exitCode = t.cmd.ProcessState.ExitCode()
+			line, err := readLine(reader, t.maxBufferSize)
+			if line != "" {
+				if !emit(line) {
+					return
 				}
-				if exitCode != 0 {
-					errChan <- errors.NewProcessError(
-						fmt.Sprintf("Command failed with exit code %d", exitCode),
-						exitCode,
-						"",
-					)
+			}
+			if err != nil {
+				if err != io.EOF {
+					readErr = err
+				}
+				break
+			}
+		}
+
+		if readErr != nil {
+			select {
+			case errChan <- errors.NewCLIConnectionError("Error reading stdout", readErr):
+			default:
+			}
+			return
+		}
+
+		// Wait for the process to exit and surface a non-zero status.
+		if t.cmd != nil {
+			waitErr := t.wait()
+			exitCode := 0
+			if t.cmd.ProcessState != nil {
+				exitCode = t.cmd.ProcessState.ExitCode()
+			} else if waitErr != nil {
+				exitCode = -1
+			}
+			if exitCode != 0 {
+				select {
+				case errChan <- errors.NewProcessError(
+					fmt.Sprintf("Command failed with exit code %d", exitCode),
+					exitCode,
+					t.lastStderr(),
+				):
+				default:
 				}
 			}
 		}
 	}()
 
 	return msgChan, errChan
+}
+
+// readLine reads one newline-terminated line, bounding its length.
+//
+// bufio.Reader.ReadString grows without limit, so the cap is enforced here: a
+// producer that never emits a newline must not be able to exhaust memory.
+func readLine(reader *bufio.Reader, maxSize int) (string, error) {
+	var b strings.Builder
+	for {
+		chunk, err := reader.ReadString('\n')
+		b.WriteString(chunk)
+		if b.Len() > maxSize {
+			return "", errors.NewCLIJSONDecodeError(
+				fmt.Sprintf("Line exceeds maximum buffer size of %d bytes", maxSize), nil)
+		}
+		if err != nil {
+			return b.String(), err
+		}
+		if strings.HasSuffix(chunk, "\n") {
+			return b.String(), nil
+		}
+	}
+}
+
+// parseStdoutLine parses one complete NDJSON line.
+//
+// Returns (nil, nil) for lines that carry no message: blank lines, and non-JSON
+// diagnostics some CLI builds write to stdout. A line that looks like JSON but
+// does not parse is corrupt -- with proper framing there is no later data that
+// could complete it -- so it is reported rather than silently dropped.
+func parseStdoutLine(line string, maxSize int) (map[string]any, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, nil
+	}
+	if len(line) > maxSize {
+		return nil, errors.NewCLIJSONDecodeError(
+			fmt.Sprintf("Message exceeds maximum buffer size of %d bytes", maxSize), nil)
+	}
+	if !strings.HasPrefix(line, "{") {
+		return nil, nil
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal([]byte(line), &data); err != nil {
+		return nil, errors.NewCLIJSONDecodeError(line, err)
+	}
+	return data, nil
 }
 
 // EndInput closes the stdin pipe.
@@ -710,38 +1007,110 @@ func (t *SubprocessTransport) EndInput() error {
 	return nil
 }
 
+// wait reaps the subprocess exactly once.
+//
+// Both the read loop (to report a non-zero exit) and Close (to reap after
+// termination) need the exit status, but cmd.Wait may only be called once.
+func (t *SubprocessTransport) wait() error {
+	t.waitOnce.Do(func() {
+		t.waitErr = t.cmd.Wait()
+	})
+	return t.waitErr
+}
+
+// lastStderr returns recently captured stderr, for enriching a ProcessError.
+func (t *SubprocessTransport) lastStderr() string {
+	t.stderrMu.Lock()
+	defer t.stderrMu.Unlock()
+	if len(t.stderrTail) == 0 {
+		return ""
+	}
+	return strings.Join(t.stderrTail, "\n")
+}
+
 // Close terminates the subprocess and cleans up.
+//
+// Teardown is staged rather than an immediate kill: close stdin, give the CLI
+// a grace period to flush its session file, then escalate to SIGTERM and
+// finally SIGKILL. Killing outright interrupts that flush and loses the last
+// assistant message of the conversation.
 func (t *SubprocessTransport) Close() error {
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
 
-	t.closed = true
-	t.ready = false
+	if t.cmd == nil {
+		t.closed = true
+		t.ready = false
+		return nil
+	}
 
-	// Close stdin
+	t.closed = true
+
+	// Close stdin under the write lock so a concurrent Write cannot race.
 	t.writeMu.Lock()
+	t.ready = false
 	if t.stdin != nil {
 		_ = t.stdin.Close()
 		t.stdin = nil
 	}
 	t.writeMu.Unlock()
 
-	// Close stderr
+	if t.cmd.Process != nil {
+		t.terminate()
+	}
+
+	// Let the stderr reader drain before dropping the pipe, so a diagnostic
+	// written just before exit still reaches the callback.
+	if t.stderrDone != nil {
+		select {
+		case <-t.stderrDone:
+		case <-time.After(gracefulShutdownTimeout):
+		}
+	}
 	if t.stderr != nil {
 		_ = t.stderr.Close()
 		t.stderr = nil
 	}
 
-	// Terminate process
-	if t.cmd != nil && t.cmd.Process != nil {
-		_ = t.cmd.Process.Kill()
-		_ = t.cmd.Wait()
-	}
+	unregisterChild(t)
 
 	t.stdout = nil
 	t.exitError = nil
+	t.cmd = nil
 
 	return nil
+}
+
+// terminate escalates stdin EOF -> SIGTERM -> SIGKILL, waiting between stages.
+func (t *SubprocessTransport) terminate() {
+	if t.waitFor(gracefulShutdownTimeout) {
+		return
+	}
+
+	// Graceful shutdown timed out; ask the process to terminate.
+	_ = t.cmd.Process.Signal(syscall.SIGTERM)
+	if t.waitFor(gracefulShutdownTimeout) {
+		return
+	}
+
+	// SIGTERM handler blocked or absent; force kill.
+	_ = t.cmd.Process.Kill()
+	t.waitFor(gracefulShutdownTimeout)
+}
+
+// waitFor reaps the process, reporting whether it exited within the timeout.
+func (t *SubprocessTransport) waitFor(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		_ = t.wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // IsReady returns true if the transport is ready.
@@ -814,6 +1183,3 @@ func compareVersions(a, b string) int {
 	}
 	return 0
 }
-
-// Ensure unused imports are used (for runtime)
-var _ = runtime.GOOS

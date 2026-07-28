@@ -4,7 +4,6 @@ package sessions
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,14 +23,11 @@ func ListSessions(directory *string) ([]types.SDKSessionInfo, error) {
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
-	projectDir := getProjectDir(absDir)
-	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
-		return nil, nil // No sessions directory
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return nil, nil // No sessions directory for this project
 	}
 
 	entries, err := os.ReadDir(projectDir)
@@ -76,12 +72,12 @@ func GetSessionInfo(sessionID string, directory *string) (*types.SDKSessionInfo,
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
-	}
+	absDir := canonicalizePath(dir)
 
-	projectDir := getProjectDir(absDir)
+	projectDir := findProjectDir(absDir)
+	if projectDir == "" {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -91,80 +87,31 @@ func GetSessionInfo(sessionID string, directory *string) (*types.SDKSessionInfo,
 	return parseSessionFile(filePath, sessionID, absDir)
 }
 
-// GetSessionMessages reads all messages from a session transcript.
-// If directory is nil, uses the current working directory.
+// GetSessionMessages reads a session's conversation.
+//
+// A transcript is a tree, not a list: retried and edited turns leave orphaned
+// branches behind. This returns the branch the conversation actually took,
+// with sidechain and internal entries filtered out. Use the Data field on each
+// message to reach the raw transcript line.
+//
+// If directory is nil the current working directory is used.
 func GetSessionMessages(sessionID string, directory *string) ([]types.SessionMessage, error) {
 	dir := "."
 	if directory != nil {
 		dir = *directory
 	}
 
-	absDir, err := filepath.Abs(dir)
+	projectDir := findProjectDir(canonicalizePath(dir))
+	if projectDir == "" {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	entries, err := readTranscript(filepath.Join(projectDir, sessionID+".jsonl"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve directory: %w", err)
+		return nil, err
 	}
 
-	projectDir := getProjectDir(absDir)
-	filePath := filepath.Join(projectDir, sessionID+".jsonl")
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer file.Close()
-
-	var messages []types.SessionMessage
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		var msg types.SessionMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue // Skip unparseable lines
-		}
-
-		// Also store the full data
-		var data map[string]any
-		if err := json.Unmarshal([]byte(line), &data); err == nil {
-			msg.Data = data
-		}
-
-		messages = append(messages, msg)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	return messages, nil
-}
-
-// getProjectDir returns the path to the Claude sessions directory for a given working directory.
-func getProjectDir(absDir string) string {
-	homeDir, _ := os.UserHomeDir()
-	sanitized := sanitizePath(absDir)
-	return filepath.Join(homeDir, ".claude", "projects", sanitized)
-}
-
-// sanitizePath converts a directory path to a sanitized form used by Claude Code.
-func sanitizePath(dir string) string {
-	// Replace path separators with hyphens
-	sanitized := strings.ReplaceAll(dir, string(filepath.Separator), "-")
-	// Remove leading hyphen
-	sanitized = strings.TrimPrefix(sanitized, "-")
-
-	// If the path is too long, use a hash
-	if len(sanitized) > 200 {
-		hash := sha256.Sum256([]byte(dir))
-		sanitized = fmt.Sprintf("%x", hash[:16])
-	}
-
-	return sanitized
+	return entriesToMessages(buildConversationChain(entries)), nil
 }
 
 // parseSessionFile reads a JSONL session file and extracts session info.
