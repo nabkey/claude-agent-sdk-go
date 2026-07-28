@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — streaming transport, control surface, and session store
 
-This completes the six-phase plan in [GAP_ANALYSIS.md](GAP_ANALYSIS.md),
-bringing the SDK to parity with the Python (0.2.128) and TypeScript (0.3.220)
-Agent SDKs.
+Brings the SDK to parity with the Python (0.2.128) and TypeScript (0.3.220)
+Agent SDKs, both of which were read in full — for TypeScript the runtime
+bundle (`sdk.mjs`) rather than only `sdk.d.ts`, so the argv and
+control-protocol changes below match what the reference code actually emits.
 
 **Transport and lifecycle**
 
@@ -141,8 +142,11 @@ transcript-mirror batching with retry, and the `*FromStore` /
 
 Options in this section previously produced CLI arguments or control-protocol
 payloads the CLI does not understand. They compiled and ran, but had no effect.
-Verified against the Python (0.2.128) and TypeScript (0.3.220) Agent SDKs; see
-[GAP_ANALYSIS.md](GAP_ANALYSIS.md).
+Verified against the Python (0.2.128) and TypeScript (0.3.220) Agent SDKs, and
+the flag changes confirmed against Claude Code CLI 2.1.220 — the build the
+TypeScript SDK bundles. The three fabricated flags do not merely get ignored:
+the CLI exits 1 with `error: unknown option`, so any option that emitted one
+broke every query outright.
 
 - `Thinking` was serialized as JSON to `--thinking`. It now maps onto the flags
   the CLI actually accepts: `--thinking adaptive`, `--max-thinking-tokens N`,
