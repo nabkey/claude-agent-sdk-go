@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/json"
 	"runtime"
 	"testing"
 
@@ -118,5 +119,67 @@ func TestValidateOptions_SessionIDWindowsMetacharacters(t *testing.T) {
 	}
 	if err != nil {
 		t.Errorf("POSIX behavior must be unchanged, got %v", err)
+	}
+}
+
+// The instance stays in this process and answers over the control channel, so
+// only the descriptive fields reach the CLI -- but all of them, including a
+// per-server tool-call timeout.
+func TestBuildCommand_SDKMCPServerConfig(t *testing.T) {
+	cmd := newTestTransport(&SubprocessOptions{
+		MCPServers: map[string]types.MCPServerConfig{
+			"tools": &types.SDKMCPServer{
+				Type: "sdk", Name: "tools", Version: "1.0.0",
+				TimeoutMS: 30000, Instance: struct{}{},
+			},
+		},
+	}).buildCommand()
+
+	raw, ok := flagValue(cmd, "--mcp-config")
+	if !ok {
+		t.Fatal("expected --mcp-config")
+	}
+
+	var config struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatalf("--mcp-config is not JSON: %v", err)
+	}
+
+	entry := config.MCPServers["tools"]
+	if entry["type"] != "sdk" || entry["name"] != "tools" || entry["version"] != "1.0.0" {
+		t.Errorf("entry = %v", entry)
+	}
+	if entry["timeout"] != float64(30000) {
+		t.Errorf("timeout = %v, want 30000", entry["timeout"])
+	}
+	if _, ok := entry["instance"]; ok {
+		t.Error("the in-process instance must not be serialized")
+	}
+}
+
+// A server that sets neither must not carry empty keys the CLI would read as
+// configured values.
+func TestBuildCommand_SDKMCPServerOmitsUnsetFields(t *testing.T) {
+	cmd := newTestTransport(&SubprocessOptions{
+		MCPServers: map[string]types.MCPServerConfig{
+			"tools": &types.SDKMCPServer{Type: "sdk", Name: "tools"},
+		},
+	}).buildCommand()
+
+	raw, _ := flagValue(cmd, "--mcp-config")
+	var config struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &config); err != nil {
+		t.Fatalf("--mcp-config is not JSON: %v", err)
+	}
+
+	entry := config.MCPServers["tools"]
+	for _, key := range []string{"version", "timeout"} {
+		if _, ok := entry[key]; ok {
+			t.Errorf("unset %q must be omitted, got %v", key, entry[key])
+		}
 	}
 }

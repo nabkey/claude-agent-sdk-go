@@ -460,11 +460,16 @@ func (t *SubprocessTransport) buildCommand() []string {
 		for name, config := range opts.MCPServers {
 			switch c := config.(type) {
 			case *types.SDKMCPServer:
-				// For SDK servers, exclude the instance field
-				serversForCLI[name] = map[string]any{
-					"type": "sdk",
-					"name": c.Name,
+				// For SDK servers, everything but the instance field, which
+				// stays in this process and answers over the control channel.
+				entry := map[string]any{"type": "sdk", "name": c.Name}
+				if c.Version != "" {
+					entry["version"] = c.Version
 				}
+				if c.TimeoutMS > 0 {
+					entry["timeout"] = c.TimeoutMS
+				}
+				serversForCLI[name] = entry
 			default:
 				serversForCLI[name] = config
 			}

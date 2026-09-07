@@ -53,7 +53,8 @@ than silently running with no plugins at all.
 `mcp.NewSDKServerWithOptions` adds `WithInstructions`, `WithToolTimeout` (a
 per-server override for `MCP_TOOL_TIMEOUT`), and `WithAlwaysLoad`, plus
 per-tool `Tool.AlwaysLoad`. The timeout travels on `initialize` as
-`sdkMcpServerConfigs` and on `mcp_set_servers`.
+`sdkMcpServerConfigs`, on `mcp_set_servers`, and in `--mcp-config`, which now
+carries every descriptive field of an SDK server rather than only its name.
 
 `Client.GetContextUsageSummary` answers from the last response's usage and
 local estimates instead of running per-category token-count API calls.
