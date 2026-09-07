@@ -10,7 +10,7 @@ go get github.com/nabkey/claude-agent-sdk-go
 
 **Prerequisites:**
 
-- Go 1.24+
+- Go 1.26+
 
 **Note:** The Claude Code CLI must be installed separately. The SDK looks for a
 `claude` binary on `PATH` and then in the usual install locations

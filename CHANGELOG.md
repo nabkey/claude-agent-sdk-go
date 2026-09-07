@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.26 is now the minimum.** The `go` directive moves from 1.24 to 1.26,
+  the older of the two release lines Go itself supports. CI tests both 1.26
+  and 1.27, so a change that needs a newer Go fails there rather than for a
+  consumer. The nested example modules move to 1.26 too, since they replace
+  the SDK and cannot declare a lower floor.
+- golangci-lint moves to v2.13.2, run through `golangci-lint-action@v9`. Both
+  halves stay pinned: the action major decides the tool's major, so `latest`
+  on either side could otherwise move one without the other.
+- `google/uuid` is recorded as a direct dependency. `sessions/fork.go` imports
+  it, so the `// indirect` marker was stale.
+
 ### Added — sync with Python 0.2.152 and TypeScript 0.3.263
 
 Both reference SDKs were read in full: the Python source tree, and for

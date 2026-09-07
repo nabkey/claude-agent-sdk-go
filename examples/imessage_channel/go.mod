@@ -1,6 +1,6 @@
 module github.com/nabkey/claude-agent-sdk-go/examples/imessage_channel
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/nabkey/claude-agent-sdk-go v0.0.0
