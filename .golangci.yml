@@ -1,6 +1,9 @@
-# golangci-lint v2 configuration. CI installs the latest release, which no
-# longer reads the v1 schema; gosimple and typecheck are folded into
-# staticcheck there and are not listed separately.
+# golangci-lint v2 configuration, pinned alongside the tool version in
+# .github/workflows/ci.yml -- the v1 and v2 config schemas are mutually
+# incompatible, so the two have to move together.
+#
+# gosimple and typecheck are folded into staticcheck in v2 and are not listed
+# separately.
 version: "2"
 
 run:
