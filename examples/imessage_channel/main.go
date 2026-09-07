@@ -118,7 +118,7 @@ CRITICAL RULES:
 	if err != nil {
 		log.Fatal("Failed to create Claude client: ", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Connect(ctx, ""); err != nil {
 		log.Fatal("Failed to connect to Claude: ", err)

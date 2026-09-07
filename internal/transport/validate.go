@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/nabkey/claude-agent-sdk-go/types"
 )
 
 // cmdExeMetacharacters are cmd.exe metacharacters, plus the quote character
@@ -27,6 +30,124 @@ func validateOptions(opts *SubprocessOptions) error {
 		}
 	}
 
+	if opts.SessionID != nil {
+		if err := rejectWindowsCmdMetacharacters("SessionID", *opts.SessionID); err != nil {
+			return err
+		}
+	}
+
+	if err := validateSkills(opts.Skills); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateSkills rejects a Skills value that cannot be turned into rules.
+//
+// Only a []string of names or types.SkillsAll is meaningful. Any other value
+// -- a bare string, a typed slice -- would silently install no skill filter
+// at all, so it fails here instead.
+func validateSkills(skills any) error {
+	switch v := skills.(type) {
+	case nil:
+		return nil
+	case []string:
+		for _, name := range v {
+			if err := validateSkillName(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	case string:
+		if v == types.SkillsAll {
+			return nil
+		}
+		return fmt.Errorf(
+			"AgentOptions.Skills must be a []string of skill names or types.SkillsAll, "+
+				"got the string %q; did you mean []string{%q}?", v, v)
+	default:
+		return fmt.Errorf(
+			"AgentOptions.Skills must be a []string of skill names or types.SkillsAll, got %T",
+			skills)
+	}
+}
+
+// skillNameInvalidChars are characters a skill name may not contain.
+//
+// Parentheses and commas are delimiters to the --allowedTools tokenizer;
+// control characters (C0, DEL, C1) never appear in a skill directory name.
+// U+FEFF is listed here rather than left to the whitespace check because the
+// CLI trims it as whitespace and Go's strings.TrimSpace does not.
+func skillNameInvalidChars(r rune) bool {
+	switch {
+	case r == '(' || r == ')' || r == ',':
+		return true
+	case r <= 0x1f || (r >= 0x7f && r <= 0x9f):
+		return true
+	case r == '\ufeff':
+		return true
+	}
+	return false
+}
+
+// validateSkillName rejects a skill name that cannot ride safely in a
+// Skill(name) rule.
+//
+// Names from AgentOptions.Skills are formatted into the --allowedTools value,
+// which the CLI splits into rules on commas and spaces outside parentheses.
+// That tokenizer does not honor escape sequences -- escaping exists only in
+// the per-rule grammar, applied after splitting -- so a name carrying a
+// delimiter cannot be passed through reliably: what it tokenizes into depends
+// on what surrounds it. A crafted name could inject extra permission rules.
+//
+// Names that tokenize cleanly but can never match the named skill are
+// rejected too, so a dead rule fails loudly here rather than silently
+// granting nothing.
+func validateSkillName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid skill name %q: skill names must be non-empty", name)
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf(
+			"invalid skill name %q: contains a surrogate or otherwise malformed "+
+				"UTF-8 sequence, which can never match a skill the CLI discovered", name)
+	}
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf(
+			"invalid skill name %q: leading or trailing whitespace can never match "+
+				"-- the Skill tool trims the invoked name", name)
+	}
+	if strings.ContainsFunc(name, skillNameInvalidChars) {
+		return fmt.Errorf(
+			"invalid skill name %q: parentheses, commas, control characters, and "+
+				"byte-order marks are not allowed. Names match the skill's directory "+
+				"name, or \"plugin:skill\" for plugin-qualified skills", name)
+	}
+	if name == "*" {
+		return fmt.Errorf(
+			"invalid skill name \"*\": use types.SkillsAll to enable every skill")
+	}
+	if strings.HasSuffix(name, ":*") || strings.HasSuffix(name, " *") {
+		return fmt.Errorf(
+			"invalid skill name %q: wildcard-suffix names are not allowed; list each "+
+				"skill by its exact name", name)
+	}
+	if strings.HasPrefix(name, "/") {
+		return fmt.Errorf(
+			"invalid skill name %q: skill names may not start with '/'. The Skills "+
+				"option takes the canonical name, not the slash-command form", name)
+	}
+	if strings.Contains(name, `\\`) {
+		return fmt.Errorf(
+			"invalid skill name %q: consecutive backslashes are not allowed -- the "+
+				"per-rule parser collapses them, so the rule would name a different "+
+				"skill", name)
+	}
+	if strings.HasSuffix(name, `\`) {
+		return fmt.Errorf(
+			"invalid skill name %q: names may not end with an unpaired backslash", name)
+	}
 	return nil
 }
 

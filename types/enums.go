@@ -56,6 +56,10 @@ const (
 	HookEventPreCompact HookEvent = "PreCompact"
 	// HookEventPostCompact fires after context compaction.
 	HookEventPostCompact HookEvent = "PostCompact"
+	// HookEventPreModelSwitch fires before the session's model changes.
+	HookEventPreModelSwitch HookEvent = "PreModelSwitch"
+	// HookEventPostModelSwitch fires after the session's model changes.
+	HookEventPostModelSwitch HookEvent = "PostModelSwitch"
 	// HookEventPermissionRequest fires on permission requests.
 	HookEventPermissionRequest HookEvent = "PermissionRequest"
 	// HookEventPermissionDenied fires when a permission request is denied.
@@ -97,6 +101,7 @@ var AllHookEvents = []HookEvent{
 	HookEventUserPromptExpansion, HookEventSessionStart, HookEventSessionEnd,
 	HookEventStop, HookEventStopFailure, HookEventSubagentStart,
 	HookEventSubagentStop, HookEventPreCompact, HookEventPostCompact,
+	HookEventPreModelSwitch, HookEventPostModelSwitch,
 	HookEventPermissionRequest, HookEventPermissionDenied, HookEventSetup,
 	HookEventTeammateIdle, HookEventTaskCreated, HookEventTaskCompleted,
 	HookEventElicitation, HookEventElicitationResult, HookEventConfigChange,

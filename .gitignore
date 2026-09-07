@@ -2,3 +2,4 @@ bin/
 *.lock
 examples/talon_agent/talon-agent
 examples/imessage_channel/imessage_channel
+examples/talon_agent/brain/talon-brain

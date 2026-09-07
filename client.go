@@ -413,7 +413,14 @@ func (c *Client) SetMCPServers(ctx context.Context, servers map[string]types.MCP
 	wire := make(map[string]any, len(servers))
 	for name, config := range servers {
 		if sdk, ok := config.(*types.SDKMCPServer); ok {
-			wire[name] = map[string]any{"type": "sdk", "name": sdk.Name}
+			// An in-process server is named, not described: the SDK already
+			// holds the instance and answers its calls over the control
+			// channel. Only the per-server timeout has to travel.
+			entry := map[string]any{"type": "sdk", "name": sdk.Name}
+			if sdk.TimeoutMS > 0 {
+				entry["timeout"] = sdk.TimeoutMS
+			}
+			wire[name] = entry
 			continue
 		}
 		wire[name] = config
@@ -439,12 +446,27 @@ func (c *Client) SetMCPPermissionModeOverride(ctx context.Context, serverName st
 
 // GetContextUsage returns a breakdown of context window usage by category,
 // the same data the CLI's /context command shows.
+//
+// This runs per-category token-count API calls. Use
+// GetContextUsageSummary for a cheaper estimate.
 func (c *Client) GetContextUsage(ctx context.Context) (*types.ContextUsage, error) {
 	query, err := c.activeQuery()
 	if err != nil {
 		return nil, err
 	}
-	return query.GetContextUsage(ctx)
+	return query.GetContextUsage(ctx, types.ContextUsageDetailFull)
+}
+
+// GetContextUsageSummary returns context window usage answered from the last
+// response's usage and local estimates, without per-category token-count API
+// calls. It is cheaper and faster than GetContextUsage, and correspondingly
+// less precise.
+func (c *Client) GetContextUsageSummary(ctx context.Context) (*types.ContextUsage, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.GetContextUsage(ctx, types.ContextUsageDetailSummary)
 }
 
 // GetSessionUsage returns session cost and token totals, plus plan rate-limit

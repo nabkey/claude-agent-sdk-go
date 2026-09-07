@@ -1,3 +1,8 @@
+# golangci-lint v2 configuration. CI installs the latest release, which no
+# longer reads the v1 schema; gosimple and typecheck are folded into
+# staticcheck there and are not listed separately.
+version: "2"
+
 run:
   timeout: 5m
 
@@ -8,12 +13,6 @@ linters:
     - staticcheck
     - unused
     - ineffassign
-    - gosimple
-    - typecheck
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-
-issues:
-  exclude-use-default: true
+  settings:
+    errcheck:
+      check-type-assertions: true

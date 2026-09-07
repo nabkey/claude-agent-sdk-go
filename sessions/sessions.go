@@ -120,7 +120,7 @@ func parseSessionFile(filePath, sessionID, cwd string) (*types.SDKSessionInfo, e
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	info := &types.SDKSessionInfo{
 		SessionID: sessionID,

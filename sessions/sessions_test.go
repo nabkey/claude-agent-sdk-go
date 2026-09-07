@@ -128,7 +128,7 @@ func TestListSessions(t *testing.T) {
 		}
 		data, _ := json.Marshal(msg)
 		_, _ = file.WriteString(string(data) + "\n")
-		file.Close()
+		_ = file.Close()
 	}
 
 	sessions, err := ListSessions(&tmpDir)
@@ -154,7 +154,7 @@ func TestRenameSession(t *testing.T) {
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 	file, _ := os.Create(filePath)
 	_, _ = file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
-	file.Close()
+	_ = file.Close()
 
 	if err := RenameSession(sessionID, "New Title", &tmpDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -186,7 +186,7 @@ func TestTagSession(t *testing.T) {
 	filePath := filepath.Join(projectDir, sessionID+".jsonl")
 	file, _ := os.Create(filePath)
 	_, _ = file.WriteString(`{"type": "user", "message": {"role": "user", "content": "test"}}` + "\n")
-	file.Close()
+	_ = file.Close()
 
 	tag := "important"
 	if err := TagSession(sessionID, &tag, &tmpDir); err != nil {

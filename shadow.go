@@ -56,6 +56,20 @@ func emitShadowWarning(key, message string, warn func(string)) {
 	log.Print("claude-agent-sdk: " + message)
 }
 
+// warnFunc returns a warning sink for these options.
+//
+// AgentOptions.Warn documents that a nil callback logs to the standard
+// logger, so that fallback lives here rather than at each call site.
+func warnFunc(o *AgentOptions) func(string) {
+	return func(message string) {
+		if o != nil && o.Warn != nil {
+			o.Warn(message)
+			return
+		}
+		log.Print("claude-agent-sdk: " + message)
+	}
+}
+
 // canUseToolShadowWarning returns the warning for these options, or "".
 func canUseToolShadowWarning(mode *types.PermissionMode, allowedTools []string) string {
 	if mode != nil && *mode == types.PermissionModeBypassPermissions {

@@ -42,10 +42,16 @@ func (s *HTTPMCPServer) ServerType() string { return "http" }
 // SDKMCPServer represents an in-process MCP server running in the SDK.
 // This is populated by mcp.NewSDKServer.
 type SDKMCPServer struct {
-	Type     string `json:"type"` // "sdk"
-	Name     string `json:"name"`
-	Version  string `json:"version,omitempty"`
-	Instance any    `json:"-"` // Internal server instance (not serialized)
+	Type    string `json:"type"` // "sdk"
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	// TimeoutMS is a per-server tool-call timeout in milliseconds,
+	// overriding MCP_TOOL_TIMEOUT for this server. It is a hard wall-clock
+	// limit per call: progress notifications do not extend it. It applies
+	// when the server is first registered, so changing it for an already
+	// registered server takes effect only after a remove and re-add.
+	TimeoutMS int `json:"timeout,omitempty"`
+	Instance  any `json:"-"` // Internal server instance (not serialized)
 }
 
 func (s *SDKMCPServer) isMCPServerConfig() {}

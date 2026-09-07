@@ -39,14 +39,26 @@ type Tool struct {
 	// The MCP schema strips unknown annotation fields, so this is carried in
 	// the tool's _meta under an Anthropic-namespaced key.
 	MaxResultSizeChars int
+	// AlwaysLoad keeps this tool in the prompt rather than deferring it
+	// behind tool search. Set it per server with mcp.WithAlwaysLoad; the two
+	// are OR'd.
+	AlwaysLoad bool
 }
 
-// meta renders the Anthropic-namespaced _meta payload, or nil if unset.
-func (t Tool) meta() map[string]any {
-	if t.MaxResultSizeChars <= 0 {
+// meta renders the Anthropic-namespaced _meta payload, or nil if nothing is
+// set. serverAlwaysLoad is the server-wide default, OR'd with the tool's own.
+func (t Tool) meta(serverAlwaysLoad bool) map[string]any {
+	meta := map[string]any{}
+	if t.MaxResultSizeChars > 0 {
+		meta["anthropic/maxResultSizeChars"] = t.MaxResultSizeChars
+	}
+	if t.AlwaysLoad || serverAlwaysLoad {
+		meta["anthropic/alwaysLoad"] = true
+	}
+	if len(meta) == 0 {
 		return nil
 	}
-	return map[string]any{"anthropic/maxResultSizeChars": t.MaxResultSizeChars}
+	return meta
 }
 
 // NewTool creates a new MCP tool definition.

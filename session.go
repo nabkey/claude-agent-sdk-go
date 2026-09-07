@@ -25,6 +25,10 @@ type session struct {
 	// shadow watches for a CanUseTool callback that never gets consulted. Nil
 	// when no callback is installed; the methods tolerate that.
 	shadow *shadowDetector
+	// resume holds the temporary config directory a store-backed resume was
+	// materialized into. Nil unless one was. It is removed on close, since it
+	// holds a copy of the caller's credentials.
+	resume *materializedResume
 }
 
 // buildTransportOptions projects the public options onto the subprocess
@@ -48,6 +52,9 @@ func buildTransportOptions(o *AgentOptions) *transport.SubprocessOptions {
 		ContinueConversation:            o.ContinueConversation,
 		Resume:                          o.Resume,
 		ResumeSessionAt:                 o.ResumeSessionAt,
+		ResumeDropsTurn:                 o.ResumeDropsTurn,
+		PermissionPrompts:               o.PermissionPrompts,
+		PluginDelivery:                  o.PluginDelivery,
 		SessionID:                       o.SessionID,
 		Settings:                        o.Settings,
 		ManagedSettings:                 o.ManagedSettings,
@@ -131,6 +138,21 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 			"CanUseTool cannot be used with PermissionPromptToolName; use one or the other")
 	}
 
+	if o.SessionStore != nil && o.PersistSession != nil && !*o.PersistSession {
+		return nil, fmt.Errorf(
+			"SessionStore cannot be used with PersistSession set to false: mirroring " +
+				"reads the transcript the CLI writes to disk, so there would be " +
+				"nothing to mirror")
+	}
+
+	switch o.PluginDelivery {
+	case "", types.PluginDeliveryArgv, types.PluginDeliveryInitialize:
+	default:
+		return nil, fmt.Errorf(
+			"invalid PluginDelivery %q: expected %q or %q",
+			o.PluginDelivery, types.PluginDeliveryArgv, types.PluginDeliveryInitialize)
+	}
+
 	opts := o.Clone()
 
 	// Route permission prompts through the control protocol when a callback
@@ -143,20 +165,28 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 
 	shadow := newShadowDetector(opts)
 
-	var (
-		trans Transport
-		err   error
-	)
+	// A store-backed resume has no local transcript for the CLI to read, so
+	// the session is materialized into a temporary config dir first and the
+	// subprocess pointed at it.
+	resume, err := materializeResumeSession(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	applyMaterializedOptions(opts, resume)
+
+	var trans Transport
 	if custom != nil {
 		trans = custom
 	} else {
 		trans, err = transport.NewSubprocessTransport(buildTransportOptions(opts))
 		if err != nil {
+			resume.cleanup()
 			return nil, err
 		}
 	}
 
 	if err := trans.Connect(ctx); err != nil {
+		resume.cleanup()
 		return nil, err
 	}
 
@@ -185,23 +215,30 @@ func newSession(ctx context.Context, prompt string, o *AgentOptions, custom Tran
 
 	if _, err := query.Initialize(ctx); err != nil {
 		_ = query.Close()
+		resume.cleanup()
 		return nil, err
 	}
 
-	return &session{transport: trans, query: query, shadow: shadow}, nil
+	return &session{transport: trans, query: query, shadow: shadow, resume: resume}, nil
 }
 
 // buildInitConfig assembles the configuration carried on the initialize
 // request rather than as CLI flags.
 func buildInitConfig(o *AgentOptions) *protocol.InitConfig {
 	cfg := &protocol.InitConfig{
-		Agents:               agentsToWire(o.Agents),
-		Title:                o.Title,
-		ToolAliases:          o.ToolAliases,
-		PlanModeInstructions: o.PlanModeInstructions,
-		PromptSuggestions:    o.PromptSuggestions,
-		ForwardSubagentText:  o.ForwardSubagentText,
-		SupportedDialogKinds: o.SupportedDialogKinds,
+		Agents:                agentsToWire(o.Agents),
+		Title:                 o.Title,
+		ToolAliases:           o.ToolAliases,
+		PlanModeInstructions:  o.PlanModeInstructions,
+		PromptSuggestions:     o.PromptSuggestions,
+		ForwardSubagentText:   o.ForwardSubagentText,
+		SupportedDialogKinds:  o.SupportedDialogKinds,
+		PerTaskStopAffordance: o.PerTaskStopAffordance,
+		Warn:                  warnFunc(o),
+	}
+
+	if o.PluginDelivery == types.PluginDeliveryInitialize {
+		cfg.Plugins = pluginsToWire(o.Plugins)
 	}
 
 	// A skills allowlist is a filter; "all" and omitted are equivalent on the
@@ -238,6 +275,22 @@ func buildInitConfig(o *AgentOptions) *protocol.InitConfig {
 	return cfg
 }
 
+// pluginsToWire renders plugin configuration for the initialize request.
+func pluginsToWire(plugins []types.PluginConfig) []map[string]any {
+	if len(plugins) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(plugins))
+	for _, plugin := range plugins {
+		entry := map[string]any{"type": plugin.Type, "path": plugin.Path}
+		if plugin.SkipMCPDiscovery {
+			entry["skipMcpDiscovery"] = true
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // agentsToWire renders agent definitions in the wire format, omitting unset
 // optional fields.
 func agentsToWire(agents map[string]types.AgentDefinition) map[string]any {
@@ -260,12 +313,17 @@ func (s *session) writeUserMessage(ctx context.Context, msg types.UserInputMessa
 	return s.transport.Write(ctx, string(data)+"\n")
 }
 
-// close tears down the control protocol and the transport.
+// close tears down the control protocol and the transport, then removes any
+// materialized resume directory.
 func (s *session) close() error {
+	var err error
 	if s.query != nil {
-		return s.query.Close()
+		err = s.query.Close()
 	}
-	return nil
+	// After the subprocess is gone, so nothing is still reading the temp
+	// config dir.
+	s.resume.cleanup()
+	return err
 }
 
 // elicitationAdapter bridges the public callback type to the protocol layer's,
@@ -304,4 +362,5 @@ func mirrorFor(o *AgentOptions) protocol.MirrorSink {
 		cwd = *o.Cwd
 	}
 	return newMirrorSink(o.SessionStore, ProjectKeyForDirectory(cwd), o.SessionStoreFlush, nil)
+
 }

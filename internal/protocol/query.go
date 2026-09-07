@@ -71,11 +71,11 @@ type Query struct {
 	inflightTasks map[string]struct{}
 	taskMu        sync.Mutex
 
-	// lastErrorResultText carries the structured errors from a result frame
-	// with is_error=true. The CLI then exits non-zero on purpose, and the
-	// resulting "exit code 1" ProcessError carries no information, so it is
-	// replaced with this.
-	lastErrorResultText string
+	// lastErrorResult carries the result frame that reported is_error=true.
+	// The CLI then exits non-zero on purpose, and the resulting "exit code 1"
+	// ProcessError carries no information, so it is replaced with a
+	// ResultError built from this.
+	lastErrorResult map[string]any
 
 	// inflightRequests maps a control request_id to the cancel func for its
 	// handler, so control_cancel_request can abandon it.
@@ -114,6 +114,12 @@ type MCPServerHandler struct {
 	Version  string
 	Instance any
 	Tools    []MCPTool
+	// Instructions are returned from the MCP initialize response and reach
+	// the model as an instructions block. Empty means none.
+	Instructions string
+	// TimeoutMS is a per-server tool-call timeout, overriding
+	// MCP_TOOL_TIMEOUT for this server. Zero leaves the CLI default.
+	TimeoutMS int
 }
 
 // MCPTool represents a tool in an MCP server.
@@ -158,6 +164,14 @@ type InitConfig struct {
 	ForwardSubagentText bool
 	// SupportedDialogKinds declares which dialogs the host can render.
 	SupportedDialogKinds []string
+	// PerTaskStopAffordance narrows an interrupt to the current turn, leaving
+	// background agents and workflows running.
+	PerTaskStopAffordance bool
+	// Plugins carries the plugin list when the caller chose initialize
+	// delivery. Nil under argv delivery, where the flags carry it instead.
+	Plugins []map[string]any
+	// Warn receives advisory warnings raised while initializing.
+	Warn func(string)
 }
 
 // apply writes the configured fields onto an initialize request, omitting
@@ -201,6 +215,12 @@ func (c *InitConfig) apply(request map[string]any) {
 	}
 	if len(c.SupportedDialogKinds) > 0 {
 		request["supportedDialogKinds"] = c.SupportedDialogKinds
+	}
+	if c.PerTaskStopAffordance {
+		request["perTaskStopAffordance"] = true
+	}
+	if len(c.Plugins) > 0 {
+		request["plugins"] = c.Plugins
 	}
 }
 
@@ -348,6 +368,18 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 		}
 		sort.Strings(names)
 		request["sdkMcpServers"] = names
+
+		// A per-server timeout travels alongside the names, so the CLI can
+		// apply it when it first registers the server.
+		configs := make(map[string]any)
+		for _, name := range names {
+			if timeout := q.sdkMCPServers[name].TimeoutMS; timeout > 0 {
+				configs[name] = map[string]any{"timeout": timeout}
+			}
+		}
+		if len(configs) > 0 {
+			request["sdkMcpServerConfigs"] = configs
+		}
 	}
 	q.initConfig.apply(request)
 
@@ -361,7 +393,33 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 
 	q.initialized = true
 	q.initResult = response
+	q.warnIfPluginsNotApplied(response)
 	return response, nil
+}
+
+// warnIfPluginsNotApplied reports a CLI that ignored initialize-delivered
+// plugins.
+//
+// A CLI too old to read the initialize payload answers without
+// plugins_applied and runs with only the plugins it was launched with, which
+// under initialize delivery is none. Silently losing every plugin is worse
+// than a warning, so say so.
+func (q *Query) warnIfPluginsNotApplied(response map[string]any) {
+	if q.initConfig == nil || len(q.initConfig.Plugins) == 0 {
+		return
+	}
+	if applied, ok := response["plugins_applied"].(bool); ok && applied {
+		return
+	}
+	warn := q.initConfig.Warn
+	if warn == nil {
+		return
+	}
+	warn(fmt.Sprintf(
+		"claude code did not report plugins_applied for the %d plugins sent with "+
+			"PluginDelivery %q; the process is running with the plugins it was "+
+			"launched with. Use types.PluginDeliveryArgv with this CLI version.",
+		len(q.initConfig.Plugins), types.PluginDeliveryInitialize))
 }
 
 // deferringTaskTypes are the task types whose completion runs a follow-up
@@ -469,16 +527,16 @@ func (q *Query) trackLifecycle(msg map[string]any, msgType string) {
 		// Anything other than the post-turn session_state_changed marker means
 		// the conversation moved on, so a later process error is a fresh crash
 		// rather than the expected exit from a prior error result.
-		if !(msgType == "system" && getString(msg, "subtype") == "session_state_changed") {
-			q.lastErrorResultText = ""
+		if msgType != "system" || getString(msg, "subtype") != "session_state_changed" {
+			q.lastErrorResult = nil
 		}
 		return
 	}
 
 	if isError, _ := msg["is_error"].(bool); isError {
-		q.lastErrorResultText = errorTextFromResult(msg)
+		q.lastErrorResult = msg
 	} else {
-		q.lastErrorResultText = ""
+		q.lastErrorResult = nil
 	}
 
 	q.flushMirror()
@@ -595,8 +653,15 @@ func (q *Query) signalResultEvent() {
 // error the CLI already reported.
 func (q *Query) setTerminalError(err error) {
 	var processErr *errors.ProcessError
-	if errors.As(err, &processErr) && q.lastErrorResultText != "" {
-		err = fmt.Errorf("claude code returned an error result: %s", q.lastErrorResultText)
+	if errors.As(err, &processErr) && q.lastErrorResult != nil {
+		// The transport's stderr is a generic placeholder here, and the
+		// result text is the real cause, so it is deliberately not carried
+		// over. The ProcessError becomes the wrapped cause instead.
+		resultErr := errors.NewResultError(
+			"claude code returned an error result: "+errorTextFromResult(q.lastErrorResult),
+			q.lastErrorResult, processErr.ExitCode, "")
+		resultErr.Cause = err
+		err = resultErr
 	}
 
 	q.terminalErrMu.Lock()
@@ -855,14 +920,26 @@ func (q *Query) handleElicitation(ctx context.Context, request map[string]any) (
 		return map[string]any{"action": string(types.ElicitationDecline)}, nil
 	}
 
-	req := types.ElicitationRequest{
-		ServerName: getString(request, "server_name"),
-		Mode:       types.ElicitationMode(getString(request, "mode")),
-		Message:    getString(request, "message"),
-		URL:        getString(request, "url"),
-		Raw:        request,
+	// The CLI sends these snake_case; the camelCase spellings are tolerated
+	// in case another build emits them.
+	serverName := getString(request, "mcp_server_name")
+	if serverName == "" {
+		serverName = getString(request, "server_name")
 	}
-	if schema, ok := request["requestedSchema"].(map[string]any); ok {
+	req := types.ElicitationRequest{
+		ServerName:    serverName,
+		Mode:          types.ElicitationMode(getString(request, "mode")),
+		Message:       getString(request, "message"),
+		URL:           getString(request, "url"),
+		ElicitationID: getString(request, "elicitation_id"),
+		Title:         getString(request, "title"),
+		DisplayName:   getString(request, "display_name"),
+		Description:   getString(request, "description"),
+		Raw:           request,
+	}
+	if schema := getMap(request, "requested_schema"); schema != nil {
+		req.RequestedSchema = schema
+	} else if schema := getMap(request, "requestedSchema"); schema != nil {
 		req.RequestedSchema = schema
 	}
 
@@ -1180,20 +1257,20 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 
 	switch method {
 	case "initialize":
-		return map[string]any{
-			"jsonrpc": "2.0",
-			"id":      id,
-			"result": map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]any{
-					"tools": map[string]any{},
-				},
-				"serverInfo": map[string]any{
-					"name":    h.Name,
-					"version": h.Version,
-				},
+		result := map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]any{
+				"tools": map[string]any{},
+			},
+			"serverInfo": map[string]any{
+				"name":    h.Name,
+				"version": h.Version,
 			},
 		}
+		if h.Instructions != "" {
+			result["instructions"] = h.Instructions
+		}
+		return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 
 	case "tools/list":
 		tools := make([]map[string]any, len(h.Tools))
@@ -1251,7 +1328,10 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 		}
 
 	case "notifications/initialized":
-		return map[string]any{"jsonrpc": "2.0", "result": map[string]any{}}
+		// A JSON-RPC notification carries no id, but the CLI wraps it in a
+		// control request that still needs an answer, so it is acknowledged
+		// with the id-zero form the reference SDKs send.
+		return map[string]any{"jsonrpc": "2.0", "id": 0, "result": map[string]any{}}
 
 	default:
 		return map[string]any{
@@ -1278,9 +1358,13 @@ func parseHookInput(input any) (types.HookInput, error) {
 		SessionID:      getString(data, "session_id"),
 		TranscriptPath: getString(data, "transcript_path"),
 		Cwd:            getString(data, "cwd"),
+		PromptID:       getString(data, "prompt_id"),
 	}
 	if pm, ok := data["permission_mode"].(string); ok {
 		base.PermissionMode = &pm
+	}
+	if effort, ok := data["effort"].(map[string]any); ok {
+		base.Effort = getString(effort, "level")
 	}
 
 	switch eventName {
@@ -1391,8 +1475,256 @@ func parseHookInput(input any) (types.HookInput, error) {
 		}
 		return input, nil
 
+	case "SessionStart":
+		return &types.SessionStartHookInput{
+			BaseHookInput:            base,
+			HookEventName:            types.HookEventSessionStart,
+			Source:                   types.SessionStartSource(getString(data, "source")),
+			AgentType:                getString(data, "agent_type"),
+			Model:                    getString(data, "model"),
+			SessionTitle:             getString(data, "session_title"),
+			SecondsSinceLastResponse: getFloat(data, "seconds_since_last_response"),
+			ContextTokens:            getInt(data, "context_tokens"),
+			PromptCacheLikelyExpired: getBool(data, "prompt_cache_likely_expired"),
+			EstimatedCacheWriteUSD:   getFloat(data, "estimated_cache_write_usd"),
+		}, nil
+
+	case "SessionEnd":
+		return &types.SessionEndHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventSessionEnd,
+			Reason:        types.ExitReason(getString(data, "reason")),
+		}, nil
+
+	case "PostCompact":
+		return &types.PostCompactHookInput{
+			BaseHookInput:  base,
+			HookEventName:  types.HookEventPostCompact,
+			Trigger:        getString(data, "trigger"),
+			CompactSummary: getString(data, "compact_summary"),
+		}, nil
+
+	case "PermissionDenied":
+		return &types.PermissionDeniedHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventPermissionDenied,
+			ToolName:      getString(data, "tool_name"),
+			ToolInput:     getMap(data, "tool_input"),
+			ToolUseID:     getString(data, "tool_use_id"),
+			Reason:        getString(data, "reason"),
+		}, nil
+
+	case "UserPromptExpansion":
+		return &types.UserPromptExpansionHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventUserPromptExpansion,
+			ExpansionType: types.UserPromptExpansionType(getString(data, "expansion_type")),
+			CommandName:   getString(data, "command_name"),
+			CommandArgs:   getString(data, "command_args"),
+			CommandSource: getString(data, "command_source"),
+			Prompt:        getString(data, "prompt"),
+		}, nil
+
+	case "StopFailure":
+		return &types.StopFailureHookInput{
+			BaseHookInput:        base,
+			HookEventName:        types.HookEventStopFailure,
+			Error:                types.AssistantMessageError(getString(data, "error")),
+			ErrorDetails:         getString(data, "error_details"),
+			LastAssistantMessage: getString(data, "last_assistant_message"),
+		}, nil
+
+	case "PostToolBatch":
+		input := &types.PostToolBatchHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventPostToolBatch,
+		}
+		if calls, ok := data["tool_calls"].([]any); ok {
+			for _, item := range calls {
+				call, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				input.ToolCalls = append(input.ToolCalls, types.PostToolBatchToolCall{
+					ToolName:     getString(call, "tool_name"),
+					ToolInput:    getMap(call, "tool_input"),
+					ToolUseID:    getString(call, "tool_use_id"),
+					ToolResponse: call["tool_response"],
+				})
+			}
+		}
+		return input, nil
+
+	case "Setup":
+		return &types.SetupHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventSetup,
+			Trigger:       getString(data, "trigger"),
+		}, nil
+
+	case "TaskCreated":
+		return &types.TaskCreatedHookInput{
+			BaseHookInput:   base,
+			HookEventName:   types.HookEventTaskCreated,
+			TaskID:          getString(data, "task_id"),
+			TaskSubject:     getString(data, "task_subject"),
+			TaskDescription: getString(data, "task_description"),
+			TeammateName:    getString(data, "teammate_name"),
+			TeamName:        getString(data, "team_name"),
+		}, nil
+
+	case "TaskCompleted":
+		return &types.TaskCompletedHookInput{
+			BaseHookInput:   base,
+			HookEventName:   types.HookEventTaskCompleted,
+			TaskID:          getString(data, "task_id"),
+			TaskSubject:     getString(data, "task_subject"),
+			TaskDescription: getString(data, "task_description"),
+			TeammateName:    getString(data, "teammate_name"),
+			TeamName:        getString(data, "team_name"),
+		}, nil
+
+	case "TeammateIdle":
+		return &types.TeammateIdleHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventTeammateIdle,
+			TeammateName:  getString(data, "teammate_name"),
+			TeamName:      getString(data, "team_name"),
+		}, nil
+
+	case "ConfigChange":
+		return &types.ConfigChangeHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventConfigChange,
+			Source:        getString(data, "source"),
+			FilePath:      getString(data, "file_path"),
+		}, nil
+
+	case "CwdChanged":
+		return &types.CwdChangedHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventCwdChanged,
+			OldCwd:        getString(data, "old_cwd"),
+			NewCwd:        getString(data, "new_cwd"),
+		}, nil
+
+	case "FileChanged":
+		return &types.FileChangedHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventFileChanged,
+			FilePath:      getString(data, "file_path"),
+			Event:         getString(data, "event"),
+		}, nil
+
+	case "DirectoryAdded":
+		return &types.DirectoryAddedHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventDirectoryAdded,
+			Directory:     getString(data, "directory"),
+			Source:        getString(data, "source"),
+		}, nil
+
+	case "MessageDisplay":
+		return &types.MessageDisplayHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventMessageDisplay,
+			TurnID:        getString(data, "turn_id"),
+			MessageID:     getString(data, "message_id"),
+			Index:         getInt(data, "index"),
+			Final:         getBool(data, "final"),
+			Delta:         getString(data, "delta"),
+		}, nil
+
+	case "InstructionsLoaded":
+		return &types.InstructionsLoadedHookInput{
+			BaseHookInput:   base,
+			HookEventName:   types.HookEventInstructionsLoaded,
+			FilePath:        getString(data, "file_path"),
+			MemoryType:      getString(data, "memory_type"),
+			LoadReason:      getString(data, "load_reason"),
+			Globs:           getStrings(data, "globs"),
+			TriggerFilePath: getString(data, "trigger_file_path"),
+			ParentFilePath:  getString(data, "parent_file_path"),
+		}, nil
+
+	case "WorktreeCreate":
+		return &types.WorktreeCreateHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventWorktreeCreate,
+			Name:          getString(data, "name"),
+		}, nil
+
+	case "WorktreeRemove":
+		return &types.WorktreeRemoveHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventWorktreeRemove,
+			WorktreePath:  getString(data, "worktree_path"),
+		}, nil
+
+	case "Elicitation":
+		return &types.ElicitationHookInput{
+			BaseHookInput:   base,
+			HookEventName:   types.HookEventElicitation,
+			MCPServerName:   getString(data, "mcp_server_name"),
+			Message:         getString(data, "message"),
+			Mode:            types.ElicitationMode(getString(data, "mode")),
+			URL:             getString(data, "url"),
+			ElicitationID:   getString(data, "elicitation_id"),
+			RequestedSchema: getMap(data, "requested_schema"),
+		}, nil
+
+	case "ElicitationResult":
+		return &types.ElicitationResultHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEventElicitationResult,
+			MCPServerName: getString(data, "mcp_server_name"),
+			ElicitationID: getString(data, "elicitation_id"),
+			Mode:          types.ElicitationMode(getString(data, "mode")),
+			Action:        types.ElicitationAction(getString(data, "action")),
+			Content:       getMap(data, "content"),
+		}, nil
+
+	case "PreModelSwitch":
+		return &types.PreModelSwitchHookInput{
+			BaseHookInput: base,
+			ModelSwitch:   modelSwitchFromMap(data),
+			HookEventName: types.HookEventPreModelSwitch,
+		}, nil
+
+	case "PostModelSwitch":
+		return &types.PostModelSwitchHookInput{
+			BaseHookInput: base,
+			ModelSwitch:   modelSwitchFromMap(data),
+			HookEventName: types.HookEventPostModelSwitch,
+		}, nil
+
 	default:
-		return nil, fmt.Errorf("unknown hook event: %s", eventName)
+		// The CLI adds hook events faster than this SDK can name them, and a
+		// callback registered for one must still run: failing here would turn
+		// a new event into a broken hook rather than an unmodeled one.
+		if eventName == "" {
+			return nil, fmt.Errorf("hook input is missing hook_event_name")
+		}
+		return &types.GenericHookInput{
+			BaseHookInput: base,
+			HookEventName: types.HookEvent(eventName),
+			Data:          data,
+		}, nil
+	}
+}
+
+// modelSwitchFromMap decodes the fields the two model-switch hooks share.
+func modelSwitchFromMap(data map[string]any) types.ModelSwitch {
+	return types.ModelSwitch{
+		FromModel:              getString(data, "from_model"),
+		ToModel:                getString(data, "to_model"),
+		RequestedModel:         getString(data, "requested_model"),
+		Source:                 getString(data, "source"),
+		ContextTokens:          getInt(data, "context_tokens"),
+		PromptCacheWarm:        getBool(data, "prompt_cache_warm"),
+		CacheTTL:               getString(data, "cache_ttl"),
+		EstimatedCacheWriteUSD: getFloat(data, "estimated_cache_write_usd"),
+		Pricing:                getString(data, "pricing"),
 	}
 }
 
@@ -1402,70 +1734,20 @@ func hookOutputToMap(output *types.HookOutput) map[string]any {
 		return map[string]any{}
 	}
 
-	result := make(map[string]any)
-
-	if output.Continue != nil {
-		result["continue"] = *output.Continue
+	// The output types carry their wire names as JSON tags, so a round trip
+	// through JSON both is shorter than a switch over every hook-specific
+	// output type and cannot drift out of sync as new ones are added.
+	raw, err := json.Marshal(output)
+	if err != nil {
+		return map[string]any{}
 	}
-	if output.SuppressOutput != nil {
-		result["suppressOutput"] = *output.SuppressOutput
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return map[string]any{}
 	}
-	if output.StopReason != nil {
-		result["stopReason"] = *output.StopReason
+	if result == nil {
+		return map[string]any{}
 	}
-	if output.Decision != nil {
-		result["decision"] = *output.Decision
-	}
-	if output.SystemMessage != nil {
-		result["systemMessage"] = *output.SystemMessage
-	}
-	if output.Reason != nil {
-		result["reason"] = *output.Reason
-	}
-	if output.Async != nil {
-		result["async"] = *output.Async
-	}
-	if output.AsyncTimeout != nil {
-		result["asyncTimeout"] = *output.AsyncTimeout
-	}
-	if output.HookSpecificOutput != nil {
-		// Convert hook-specific output based on type
-		switch hso := output.HookSpecificOutput.(type) {
-		case *types.PreToolUseHookSpecificOutput:
-			hsoMap := map[string]any{"hookEventName": hso.HookEventName}
-			if hso.PermissionDecision != nil {
-				hsoMap["permissionDecision"] = *hso.PermissionDecision
-			}
-			if hso.PermissionDecisionReason != nil {
-				hsoMap["permissionDecisionReason"] = *hso.PermissionDecisionReason
-			}
-			if hso.UpdatedInput != nil {
-				hsoMap["updatedInput"] = hso.UpdatedInput
-			}
-			if hso.AdditionalContext != nil {
-				hsoMap["additionalContext"] = *hso.AdditionalContext
-			}
-			result["hookSpecificOutput"] = hsoMap
-
-		case *types.PostToolUseHookSpecificOutput:
-			hsoMap := map[string]any{"hookEventName": hso.HookEventName}
-			if hso.AdditionalContext != nil {
-				hsoMap["additionalContext"] = *hso.AdditionalContext
-			}
-			if hso.UpdatedMCPToolOutput != nil {
-				hsoMap["updatedMcpToolOutput"] = hso.UpdatedMCPToolOutput
-			}
-			result["hookSpecificOutput"] = hsoMap
-
-		case *types.UserPromptSubmitHookSpecificOutput:
-			hsoMap := map[string]any{"hookEventName": hso.HookEventName}
-			if hso.AdditionalContext != nil {
-				hsoMap["additionalContext"] = *hso.AdditionalContext
-			}
-			result["hookSpecificOutput"] = hsoMap
-		}
-	}
-
 	return result
 }
 
@@ -1491,9 +1773,34 @@ func getInt(m map[string]any, key string) int {
 	return 0
 }
 
+func getFloat(m map[string]any, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
 func getBool(m map[string]any, key string) bool {
 	if v, ok := m[key].(bool); ok {
 		return v
 	}
 	return false
+}
+
+// getStrings reads a list of strings, skipping entries of any other type.
+func getStrings(m map[string]any, key string) []string {
+	items, ok := m[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

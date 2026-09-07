@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"context"
+	stderrors "errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,8 +140,30 @@ func TestProcessErrorIsReplacedWithResultErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a terminal error")
 	}
-	if got := err.Error(); got != "claude code returned an error result: tool failed; and again" {
+	if got := err.Error(); !strings.Contains(got, "claude code returned an error result: tool failed; and again") {
 		t.Errorf("unexpected error text: %s", got)
+	}
+
+	// The replacement is structured, so callers can branch on the reason
+	// without matching on strings.
+	var resultErr *sdkerrors.ResultError
+	if !stderrors.As(err, &resultErr) {
+		t.Fatalf("expected a *ResultError, got %T", err)
+	}
+	if resultErr.Subtype != "error_during_execution" {
+		t.Errorf("Subtype = %q, want error_during_execution", resultErr.Subtype)
+	}
+	if len(resultErr.Errors) != 2 || resultErr.Errors[0] != "tool failed" {
+		t.Errorf("Errors = %v, want the two reported strings", resultErr.Errors)
+	}
+	if resultErr.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", resultErr.ExitCode)
+	}
+
+	// It embeds ProcessError, so handlers written against that keep matching.
+	var processErr *sdkerrors.ProcessError
+	if !stderrors.As(err, &processErr) {
+		t.Error("a ResultError must still match *ProcessError")
 	}
 }
 
@@ -165,7 +189,7 @@ func TestProcessErrorSurvivesWhenConversationMovedOn(t *testing.T) {
 	ft.errChan <- sdkerrors.NewProcessError("Command failed with exit code 1", 1, "")
 	waitFor(t, ctx, func() bool { return q.Err() != nil })
 
-	if got := q.Err().Error(); got == "claude code returned an error result: old failure" {
+	if got := q.Err().Error(); strings.Contains(got, "old failure") {
 		t.Error("a stale error result must not mask a fresh crash")
 	}
 }

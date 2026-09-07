@@ -103,6 +103,15 @@ func ListSubagentsFromStore(ctx context.Context, store SessionStore, projectKey,
 }
 
 // GetSubagentMessagesFromStore reads one stored subagent transcript.
+//
+// Every message shares the subagent's parent ids: ParentToolUseID names the
+// Agent tool_use block in the parent session that spawned it, and
+// ParentAgentID the spawning subagent for nested runs. Both come from the
+// synthetic agent_metadata entry the store carries in place of the on-disk
+// .meta.json sidecar, and are empty when the store has none.
+//
+// Unlike GetSessionMessagesFromStore this does not filter sidechain entries:
+// every entry in a subagent transcript is sidechain by construction.
 func GetSubagentMessagesFromStore(ctx context.Context, store SessionStore, projectKey, sessionID, subpath string) ([]types.SessionMessage, error) {
 	if store == nil {
 		return nil, fmt.Errorf("session store is nil")
@@ -116,7 +125,63 @@ func GetSubagentMessagesFromStore(ctx context.Context, store SessionStore, proje
 	if err != nil {
 		return nil, err
 	}
-	return storeEntriesToMessages(entries), nil
+
+	meta, transcript := splitAgentMetadata(entries)
+	toolUseID, parentAgentID := sessions.ParentIDsFromAgentMetadata(meta)
+	return storeSubagentEntriesToMessages(transcript, toolUseID, parentAgentID), nil
+}
+
+// splitAgentMetadata separates the synthetic agent_metadata entry from the
+// transcript lines.
+//
+// A subagent's SessionStore stream carries its .meta.json sidecar as
+// {"type": "agent_metadata", ...} entries alongside the transcript. The entry
+// is rewritten on resume, so the last one wins.
+func splitAgentMetadata(entries []types.SessionStoreEntry) (map[string]any, []types.SessionStoreEntry) {
+	var meta map[string]any
+	transcript := make([]types.SessionStoreEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type() == "agent_metadata" {
+			meta = entry
+			continue
+		}
+		transcript = append(transcript, entry)
+	}
+	return meta, transcript
+}
+
+// storeSubagentEntriesToMessages projects stored subagent entries onto session
+// messages, stamping the shared parent ids onto each.
+func storeSubagentEntriesToMessages(entries []types.SessionStoreEntry, toolUseID, parentAgentID string) []types.SessionMessage {
+	out := make([]types.SessionMessage, 0, len(entries))
+	for _, entry := range entries {
+		entryType := entry.Type()
+		if entryType != "user" && entryType != "assistant" {
+			continue
+		}
+		if meta, ok := entry["isMeta"].(bool); ok && meta {
+			continue
+		}
+
+		msg := types.SessionMessage{
+			Type:          entryType,
+			UUID:          entry.UUID(),
+			Message:       entry["message"],
+			ParentAgentID: parentAgentID,
+			Data:          entry,
+		}
+		if id, ok := entry["sessionId"].(string); ok {
+			msg.SessionID = id
+		}
+		if toolUseID != "" {
+			id := toolUseID
+			msg.ParentToolUseID = &id
+		} else if id, ok := entry["parentToolUseID"].(string); ok {
+			msg.ParentToolUseID = &id
+		}
+		out = append(out, msg)
+	}
+	return out
 }
 
 // DeleteSessionViaStore removes a session from a store.

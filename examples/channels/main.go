@@ -125,7 +125,7 @@ func runChannelSession(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	fmt.Println("  Connecting to Claude with channel server...")
 
