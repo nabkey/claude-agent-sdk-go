@@ -15,6 +15,11 @@ type BaseHookInput struct {
 	TranscriptPath string  `json:"transcript_path"`
 	Cwd            string  `json:"cwd"`
 	PermissionMode *string `json:"permission_mode,omitempty"`
+	// PromptID identifies the prompt the event belongs to, when the CLI
+	// reports one.
+	PromptID string `json:"prompt_id,omitempty"`
+	// Effort is the session's applied effort level, when one is set.
+	Effort string `json:"effort,omitempty"`
 }
 
 func (b *BaseHookInput) GetSessionID() string { return b.SessionID }
@@ -165,8 +170,13 @@ func (p *PreToolUseHookSpecificOutput) isHookSpecificOutput() {}
 
 // PostToolUseHookSpecificOutput is the hook-specific output for PostToolUse events.
 type PostToolUseHookSpecificOutput struct {
-	HookEventName        string  `json:"hookEventName"` // "PostToolUse"
-	AdditionalContext    *string `json:"additionalContext,omitempty"`
+	HookEventName     string  `json:"hookEventName"` // "PostToolUse"
+	AdditionalContext *string `json:"additionalContext,omitempty"`
+	// ClassifierContext is a short host-asserted note about the call's result
+	// that auto mode's permission classifier reads alongside that result. It
+	// is not shown to the model.
+	ClassifierContext    *string `json:"classifierContext,omitempty"`
+	UpdatedToolOutput    any     `json:"updatedToolOutput,omitempty"`
 	UpdatedMCPToolOutput any     `json:"updatedMcpToolOutput,omitempty"`
 }
 
@@ -176,9 +186,90 @@ func (p *PostToolUseHookSpecificOutput) isHookSpecificOutput() {}
 type UserPromptSubmitHookSpecificOutput struct {
 	HookEventName     string  `json:"hookEventName"` // "UserPromptSubmit"
 	AdditionalContext *string `json:"additionalContext,omitempty"`
+	// SessionTitle renames the session.
+	SessionTitle *string `json:"sessionTitle,omitempty"`
+	// SuppressOriginalPrompt drops the user's prompt text, leaving only
+	// AdditionalContext. Use it when the hook fully replaces the prompt.
+	SuppressOriginalPrompt *bool `json:"suppressOriginalPrompt,omitempty"`
 }
 
 func (u *UserPromptSubmitHookSpecificOutput) isHookSpecificOutput() {}
+
+// UserPromptExpansionHookSpecificOutput is the hook-specific output for
+// UserPromptExpansion events.
+type UserPromptExpansionHookSpecificOutput struct {
+	HookEventName     string  `json:"hookEventName"` // "UserPromptExpansion"
+	AdditionalContext *string `json:"additionalContext,omitempty"`
+	// SuppressOriginalPrompt drops the expanded prompt text, leaving only
+	// AdditionalContext.
+	SuppressOriginalPrompt *bool `json:"suppressOriginalPrompt,omitempty"`
+}
+
+func (u *UserPromptExpansionHookSpecificOutput) isHookSpecificOutput() {}
+
+// SessionStartHookSpecificOutput is the hook-specific output for SessionStart
+// events.
+type SessionStartHookSpecificOutput struct {
+	HookEventName     string  `json:"hookEventName"` // "SessionStart"
+	AdditionalContext *string `json:"additionalContext,omitempty"`
+	// InitialUserMessage is auto-submitted as the session's first turn.
+	InitialUserMessage *string `json:"initialUserMessage,omitempty"`
+	// SessionTitle names the session.
+	SessionTitle *string `json:"sessionTitle,omitempty"`
+	// WatchPaths registers paths whose changes raise FileChanged hooks.
+	WatchPaths []string `json:"watchPaths,omitempty"`
+	// ReloadSkills rescans skills from disk before the session runs.
+	ReloadSkills *bool `json:"reloadSkills,omitempty"`
+}
+
+func (s *SessionStartHookSpecificOutput) isHookSpecificOutput() {}
+
+// PermissionDeniedHookSpecificOutput is the hook-specific output for
+// PermissionDenied events.
+type PermissionDeniedHookSpecificOutput struct {
+	HookEventName string `json:"hookEventName"` // "PermissionDenied"
+	// Retry re-runs the denied tool call, for a hook that fixed whatever
+	// caused the denial.
+	Retry *bool `json:"retry,omitempty"`
+}
+
+func (p *PermissionDeniedHookSpecificOutput) isHookSpecificOutput() {}
+
+// PermissionDecision is a PermissionRequest hook's ruling on a tool call.
+type PermissionDecision struct {
+	// Behavior is PermissionBehaviorAllow or PermissionBehaviorDeny.
+	Behavior PermissionBehavior `json:"behavior"`
+	// UpdatedInput replaces the tool input, on an allow.
+	UpdatedInput map[string]any `json:"updatedInput,omitempty"`
+	// UpdatedPermissions are rule changes to apply, on an allow.
+	UpdatedPermissions []PermissionUpdate `json:"updatedPermissions,omitempty"`
+	// Message explains a denial to the model.
+	Message *string `json:"message,omitempty"`
+	// Interrupt ends the turn instead of letting the model continue after a
+	// denial.
+	Interrupt *bool `json:"interrupt,omitempty"`
+}
+
+// PermissionRequestHookSpecificOutput is the hook-specific output for
+// PermissionRequest events. It answers the prompt outright.
+type PermissionRequestHookSpecificOutput struct {
+	HookEventName string              `json:"hookEventName"` // "PermissionRequest"
+	Decision      *PermissionDecision `json:"decision,omitempty"`
+}
+
+func (p *PermissionRequestHookSpecificOutput) isHookSpecificOutput() {}
+
+// ContextHookSpecificOutput is the hook-specific output for the events whose
+// only output is additional context: Notification, Stop, SubagentStart,
+// SubagentStop, PostToolUseFailure, and PostToolBatch.
+//
+// Set HookEventName to the event's own name; the CLI matches on it.
+type ContextHookSpecificOutput struct {
+	HookEventName     string  `json:"hookEventName"`
+	AdditionalContext *string `json:"additionalContext,omitempty"`
+}
+
+func (c *ContextHookSpecificOutput) isHookSpecificOutput() {}
 
 // HookOutput is the output from a hook callback.
 type HookOutput struct {
@@ -188,9 +279,12 @@ type HookOutput struct {
 	StopReason     *string `json:"stopReason,omitempty"`
 
 	// Decision fields
-	Decision      *string `json:"decision,omitempty"` // "block"
+	Decision      *string `json:"decision,omitempty"` // "approve" or "block"
 	SystemMessage *string `json:"systemMessage,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
+	// TerminalSequence is written to the host's terminal, for hooks that
+	// drive a TUI.
+	TerminalSequence *string `json:"terminalSequence,omitempty"`
 
 	// Async support
 	Async        *bool `json:"async,omitempty"`

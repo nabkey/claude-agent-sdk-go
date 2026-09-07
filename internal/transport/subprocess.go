@@ -154,6 +154,14 @@ type SubprocessOptions struct {
 	AllowDangerouslySkipPermissions bool
 	// ResumeSessionAt resumes only up to this message UUID.
 	ResumeSessionAt *string
+	// ResumeDropsTurn names the turn a truncating resume intends to drop.
+	ResumeDropsTurn *string
+	// PermissionPrompts controls what happens to a prompt no host answers.
+	PermissionPrompts *types.PermissionPromptsMode
+	// PluginDelivery selects how Plugins reaches the CLI. Empty means argv;
+	// PluginDeliveryInitialize suppresses the --plugin-dir flags here so the
+	// initialize request carries them instead.
+	PluginDelivery types.PluginDelivery
 	// SessionID pins a session UUID.
 	SessionID *string
 	// ManagedSettings supplies policy-tier settings as JSON.
@@ -402,6 +410,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, "--permission-prompt-tool", *opts.PermissionPromptToolName)
 	}
 
+	if opts.PermissionPrompts != nil {
+		cmd = append(cmd, "--permission-prompts", string(*opts.PermissionPrompts))
+	}
+
 	if opts.PermissionMode != nil {
 		cmd = append(cmd, "--permission-mode", string(*opts.PermissionMode))
 	}
@@ -422,6 +434,10 @@ func (t *SubprocessTransport) buildCommand() []string {
 
 	if opts.ResumeSessionAt != nil {
 		cmd = append(cmd, fmt.Sprintf("--resume-session-at=%s", *opts.ResumeSessionAt))
+	}
+
+	if opts.ResumeDropsTurn != nil {
+		cmd = append(cmd, fmt.Sprintf("--resume-drops-turn=%s", *opts.ResumeDropsTurn))
 	}
 
 	if opts.SessionID != nil {
@@ -516,16 +532,19 @@ func (t *SubprocessTransport) buildCommand() []string {
 		cmd = append(cmd, fmt.Sprintf("--setting-sources=%s", strings.Join(sources, ",")))
 	}
 
-	// Plugins
-	for _, plugin := range opts.Plugins {
-		if plugin.Type != "local" {
-			continue
+	// Plugins. Under PluginDeliveryInitialize they ride on the initialize
+	// request instead, so the command line does not grow with the count.
+	if opts.PluginDelivery != types.PluginDeliveryInitialize {
+		for _, plugin := range opts.Plugins {
+			if plugin.Type != "local" {
+				continue
+			}
+			flag := "--plugin-dir"
+			if plugin.SkipMCPDiscovery {
+				flag = "--plugin-dir-no-mcp"
+			}
+			cmd = append(cmd, flag, plugin.Path)
 		}
-		flag := "--plugin-dir"
-		if plugin.SkipMCPDiscovery {
-			flag = "--plugin-dir-no-mcp"
-		}
-		cmd = append(cmd, flag, plugin.Path)
 	}
 
 	// Extra args. Sort for deterministic argv ordering across runs.

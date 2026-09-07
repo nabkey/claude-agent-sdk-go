@@ -33,6 +33,8 @@ func ParseMessage(data map[string]any) (types.Message, error) {
 		return parseRateLimitEvent(data)
 	case "channel_message":
 		return parseChannelMessage(data)
+	case "conversation_reset":
+		return parseConversationReset(data)
 	default:
 		// Forward-compatible: silently skip unknown message types.
 		return nil, nil
@@ -51,6 +53,9 @@ func parseUserMessage(data map[string]any) (*types.UserMessage, error) {
 	if tur, ok := data["tool_use_result"].(map[string]any); ok {
 		msg.ToolUseResult = tur
 	}
+	msg.SessionID = getString(data, "session_id")
+	msg.IsSynthetic = getBool(data, "isSynthetic")
+	msg.Origin = types.MessageOriginFromAny(data["origin"])
 
 	messageData, ok := data["message"].(map[string]any)
 	if !ok {
@@ -76,8 +81,11 @@ func parseUserMessage(data map[string]any) (*types.UserMessage, error) {
 
 func parseAssistantMessage(data map[string]any) (*types.AssistantMessage, error) {
 	msg := &types.AssistantMessage{
-		SessionID: getString(data, "session_id"),
-		UUID:      getString(data, "uuid"),
+		SessionID:        getString(data, "session_id"),
+		UUID:             getString(data, "uuid"),
+		UserMessageUUID:  getString(data, "user_message_uuid"),
+		UserMessageUUIDs: getStrings(data, "user_message_uuids"),
+		ContextUsage:     types.SDKContextUsageFromAny(data["context_usage"]),
 	}
 
 	if parentID, ok := data["parent_tool_use_id"].(string); ok {
@@ -125,12 +133,19 @@ func parseSystemMessage(data map[string]any) (types.Message, error) {
 	switch subtype {
 	case "task_started":
 		msg := &types.TaskStartedMessage{
-			SystemMessage: base,
-			TaskID:        getString(data, "task_id"),
-			Description:   getString(data, "description"),
-			UUID:          getString(data, "uuid"),
-			SessionID:     getString(data, "session_id"),
-			ToolUseID:     getString(data, "tool_use_id"),
+			SystemMessage:  base,
+			TaskID:         getString(data, "task_id"),
+			Description:    getString(data, "description"),
+			UUID:           getString(data, "uuid"),
+			SessionID:      getString(data, "session_id"),
+			ToolUseID:      getString(data, "tool_use_id"),
+			SubagentType:   getString(data, "subagent_type"),
+			IsBackgrounded: getBool(data, "is_backgrounded"),
+			SpawnDepth:     getInt(data, "spawn_depth"),
+			WorkflowName:   getString(data, "workflow_name"),
+			Prompt:         getString(data, "prompt"),
+			SkipTranscript: getBool(data, "skip_transcript"),
+			Ambient:        getBool(data, "ambient"),
 		}
 		if taskType, ok := data["task_type"].(string); ok {
 			msg.TaskType = &taskType
@@ -156,14 +171,17 @@ func parseSystemMessage(data map[string]any) (types.Message, error) {
 
 	case "task_notification":
 		msg := &types.TaskNotificationMessage{
-			SystemMessage: base,
-			TaskID:        getString(data, "task_id"),
-			Status:        types.TaskNotificationStatus(getString(data, "status")),
-			OutputFile:    getString(data, "output_file"),
-			Summary:       getString(data, "summary"),
-			UUID:          getString(data, "uuid"),
-			SessionID:     getString(data, "session_id"),
-			ToolUseID:     getString(data, "tool_use_id"),
+			SystemMessage:  base,
+			TaskID:         getString(data, "task_id"),
+			Status:         types.TaskNotificationStatus(getString(data, "status")),
+			OutputFile:     getString(data, "output_file"),
+			Summary:        getString(data, "summary"),
+			UUID:           getString(data, "uuid"),
+			SessionID:      getString(data, "session_id"),
+			ToolUseID:      getString(data, "tool_use_id"),
+			ResourceLinks:  types.MCPResourceLinksFromAny(data["resource_links"]),
+			SkipTranscript: getBool(data, "skip_transcript"),
+			Ambient:        getBool(data, "ambient"),
 		}
 		if usageData, ok := data["usage"].(map[string]any); ok {
 			usage := parseTaskUsage(usageData)
@@ -281,19 +299,22 @@ func parseSystemMessage(data map[string]any) (types.Message, error) {
 		return msg, nil
 
 	case "background_tasks_changed":
-		msg := &types.BackgroundTasksChangedMessage{
+		return &types.BackgroundTasksChangedMessage{
 			SystemMessage: base,
+			Tasks:         types.BackgroundTasksFromAny(data["tasks"]),
 			SessionID:     getString(data, "session_id"),
 			UUID:          getString(data, "uuid"),
-		}
-		if tasks, ok := data["tasks"].([]any); ok {
-			for _, item := range tasks {
-				if t, ok := item.(map[string]any); ok {
-					msg.Tasks = append(msg.Tasks, t)
-				}
-			}
-		}
-		return msg, nil
+		}, nil
+
+	case "thinking_tokens":
+		return &types.ThinkingTokensMessage{
+			SystemMessage:        base,
+			EstimatedTokens:      getInt(data, "estimated_tokens"),
+			EstimatedTokensDelta: getInt(data, "estimated_tokens_delta"),
+			UserMessageUUID:      getString(data, "user_message_uuid"),
+			SessionID:            getString(data, "session_id"),
+			UUID:                 getString(data, "uuid"),
+		}, nil
 
 	case "prompt_suggestion":
 		return &types.PromptSuggestionMessage{
@@ -310,13 +331,20 @@ func parseSystemMessage(data map[string]any) (types.Message, error) {
 
 func parseResultMessage(data map[string]any) (*types.ResultMessage, error) {
 	msg := &types.ResultMessage{
-		Subtype:        getString(data, "subtype"),
-		SessionID:      getString(data, "session_id"),
-		UUID:           getString(data, "uuid"),
-		DurationMS:     getInt(data, "duration_ms"),
-		DurationAPIMS:  getInt(data, "duration_api_ms"),
-		NumTurns:       getInt(data, "num_turns"),
-		TerminalReason: types.TerminalReason(getString(data, "terminal_reason")),
+		Subtype:          getString(data, "subtype"),
+		SessionID:        getString(data, "session_id"),
+		UUID:             getString(data, "uuid"),
+		DurationMS:       getInt(data, "duration_ms"),
+		DurationAPIMS:    getInt(data, "duration_api_ms"),
+		NumTurns:         getInt(data, "num_turns"),
+		TerminalReason:   types.TerminalReason(getString(data, "terminal_reason")),
+		Origin:           types.MessageOriginFromAny(data["origin"]),
+		UserMessageUUID:  getString(data, "user_message_uuid"),
+		UserMessageUUIDs: getStrings(data, "user_message_uuids"),
+	}
+	if queued, ok := data["queued_turn_count"].(float64); ok {
+		q := int(queued)
+		msg.QueuedTurnCount = &q
 	}
 	msg.IsError, _ = data["is_error"].(bool)
 
@@ -418,8 +446,10 @@ func parseRateLimitEvent(data map[string]any) (*types.RateLimitEvent, error) {
 
 func parseStreamEvent(data map[string]any) (*types.StreamEvent, error) {
 	msg := &types.StreamEvent{
-		UUID:      getString(data, "uuid"),
-		SessionID: getString(data, "session_id"),
+		UUID:             getString(data, "uuid"),
+		SessionID:        getString(data, "session_id"),
+		UserMessageUUID:  getString(data, "user_message_uuid"),
+		UserMessageUUIDs: getStrings(data, "user_message_uuids"),
 	}
 	if event, ok := data["event"].(map[string]any); ok {
 		msg.Event = event
@@ -428,6 +458,14 @@ func parseStreamEvent(data map[string]any) (*types.StreamEvent, error) {
 		msg.ParentToolUseID = &parentID
 	}
 	return msg, nil
+}
+
+func parseConversationReset(data map[string]any) (*types.ConversationResetMessage, error) {
+	return &types.ConversationResetMessage{
+		NewConversationID: getString(data, "new_conversation_id"),
+		UUID:              getString(data, "uuid"),
+		SessionID:         getString(data, "session_id"),
+	}, nil
 }
 
 func parseChannelMessage(data map[string]any) (*types.ChannelMessage, error) {

@@ -439,12 +439,27 @@ func (c *Client) SetMCPPermissionModeOverride(ctx context.Context, serverName st
 
 // GetContextUsage returns a breakdown of context window usage by category,
 // the same data the CLI's /context command shows.
+//
+// This runs per-category token-count API calls. Use
+// GetContextUsageSummary for a cheaper estimate.
 func (c *Client) GetContextUsage(ctx context.Context) (*types.ContextUsage, error) {
 	query, err := c.activeQuery()
 	if err != nil {
 		return nil, err
 	}
-	return query.GetContextUsage(ctx)
+	return query.GetContextUsage(ctx, types.ContextUsageDetailFull)
+}
+
+// GetContextUsageSummary returns context window usage answered from the last
+// response's usage and local estimates, without per-category token-count API
+// calls. It is cheaper and faster than GetContextUsage, and correspondingly
+// less precise.
+func (c *Client) GetContextUsageSummary(ctx context.Context) (*types.ContextUsage, error) {
+	query, err := c.activeQuery()
+	if err != nil {
+		return nil, err
+	}
+	return query.GetContextUsage(ctx, types.ContextUsageDetailSummary)
 }
 
 // GetSessionUsage returns session cost and token totals, plus plan rate-limit

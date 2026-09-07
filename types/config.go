@@ -25,6 +25,33 @@ type TaskBudget struct {
 	Total int `json:"total"`
 }
 
+// PermissionPromptsMode controls what the CLI does with a permission prompt
+// that no host is available to answer.
+type PermissionPromptsMode string
+
+const (
+	// PermissionPromptsHost routes prompts to the host, the CLI default.
+	PermissionPromptsHost PermissionPromptsMode = "host"
+	// PermissionPromptsNone auto-denies prompts, for sessions with nobody to
+	// answer them. Auto mode's classifier still runs, so calls it approves
+	// are unaffected; only what would have been asked is denied.
+	PermissionPromptsNone PermissionPromptsMode = "none"
+)
+
+// PluginDelivery selects how plugin configuration reaches the CLI.
+type PluginDelivery string
+
+const (
+	// PluginDeliveryArgv passes each plugin as a --plugin-dir flag. This is
+	// the default, and the only form older CLI builds understand.
+	PluginDeliveryArgv PluginDelivery = "argv"
+	// PluginDeliveryInitialize sends plugins on the initialize request
+	// instead, so the launch command line does not grow with the plugin
+	// count. Use it when many plugins would overflow the platform's command
+	// line limit, which is what fails first on Windows.
+	PluginDeliveryInitialize PluginDelivery = "initialize"
+)
+
 // SessionStoreFlushMode controls when transcript-mirror entries are flushed to
 // a SessionStore.
 type SessionStoreFlushMode string

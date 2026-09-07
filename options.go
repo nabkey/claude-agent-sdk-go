@@ -42,6 +42,12 @@ type AgentOptions struct {
 	// tool. Mutually exclusive with CanUseTool.
 	PermissionPromptToolName *string
 
+	// PermissionPrompts controls what happens to a prompt no host will
+	// answer. Nil leaves the CLI default (host) in place; set
+	// types.PermissionPromptsNone to auto-deny in an unattended session
+	// without disabling auto mode's classifier.
+	PermissionPrompts *types.PermissionPromptsMode
+
 	// CanUseTool is called when a tool call would otherwise prompt the user.
 	// It is not consulted for calls already permitted by AllowedTools,
 	// PermissionMode, or settings allow rules -- those never reach a prompt.
@@ -129,12 +135,24 @@ type AgentOptions struct {
 	// ResumeSessionAt resumes only up to and including this message UUID.
 	ResumeSessionAt *string
 
+	// ResumeDropsTurn declares which turn a truncating ResumeSessionAt
+	// intends to discard, naming that turn's user message UUID. The CLI
+	// refuses the resume if anything outside that turn would be dropped, so
+	// a rewind-to-before-the-last-prompt cannot silently discard messages the
+	// caller never observed. Ignored without ResumeSessionAt.
+	ResumeDropsTurn *string
+
 	// SessionID pins a UUID for a new session instead of generating one.
 	SessionID *string
 
 	// ForkSession branches a resumed session to a new ID rather than
 	// continuing it.
 	ForkSession bool
+
+	// PerTaskStopAffordance narrows Interrupt to the current turn, leaving
+	// background agents and workflows running. Without it -- and always for
+	// one-shot Query prompts -- an interrupt stops them too.
+	PerTaskStopAffordance bool
 
 	// Title names a new session instead of auto-generating one. When
 	// resuming, the persisted title wins.
@@ -175,6 +193,10 @@ type AgentOptions struct {
 
 	// Plugins loads local plugins providing commands, agents, skills, hooks.
 	Plugins []types.PluginConfig
+
+	// PluginDelivery selects how Plugins reaches the CLI. Empty means
+	// types.PluginDeliveryArgv.
+	PluginDelivery types.PluginDelivery
 
 	// --- Callbacks -----------------------------------------------------------
 

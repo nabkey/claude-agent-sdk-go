@@ -41,8 +41,16 @@ func ListSubagents(sessionID string, directory *string) ([]string, error) {
 
 // GetSubagentMessages reads one subagent's transcript.
 //
-// Like GetSessionMessages, the returned messages are the visible conversation
-// chain rather than every raw line.
+// The returned messages are the subagent's conversation chain rather than
+// every raw line. Every message in a subagent transcript shares the same
+// parent ids: ParentToolUseID names the Agent tool_use block in the parent
+// session that spawned this subagent, and ParentAgentID the spawning
+// subagent for nested runs. Both are recovered from the transcript's
+// .meta.json sidecar and are empty when it is missing or unreadable.
+//
+// Unlike GetSessionMessages this does not filter sidechain entries: every
+// entry in a subagent transcript is sidechain by construction, so filtering
+// them would return nothing.
 func GetSubagentMessages(sessionID, agentID string, directory *string) ([]types.SessionMessage, error) {
 	dir, err := resolveSubagentsDir(sessionID, directory)
 	if err != nil {
@@ -66,7 +74,133 @@ func GetSubagentMessages(sessionID, agentID string, directory *string) ([]types.
 	if err != nil {
 		return nil, err
 	}
-	return entriesToMessages(buildConversationChain(entries)), nil
+
+	// A failure to read the optional sidecar degrades to "no parent ids"
+	// rather than failing the transcript read.
+	toolUseID, parentAgentID := readAgentMetadataSidecar(path)
+	return subagentEntriesToMessages(buildSubagentChain(entries), toolUseID, parentAgentID), nil
+}
+
+// AgentMetadataSidecarPath maps agent-<id>.jsonl to agent-<id>.meta.json in
+// the same directory. It is the single definition of the naming convention,
+// shared by the read path, session import, and resume materialization.
+func AgentMetadataSidecarPath(transcriptPath string) string {
+	return strings.TrimSuffix(transcriptPath, ".jsonl") + ".meta.json"
+}
+
+// readAgentMetadataSidecar reads the parent ids from a subagent transcript's
+// .meta.json sidecar, returning empty strings when it is missing, unreadable,
+// or not a JSON object.
+func readAgentMetadataSidecar(transcriptPath string) (toolUseID, parentAgentID string) {
+	raw, err := os.ReadFile(AgentMetadataSidecarPath(transcriptPath))
+	if err != nil {
+		return "", ""
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return "", ""
+	}
+	return ParentIDsFromAgentMetadata(meta)
+}
+
+// ParentIDsFromAgentMetadata extracts (toolUseId, parentAgentId) from an agent
+// metadata object. It works for both the on-disk .meta.json sidecar and the
+// synthetic agent_metadata entry a SessionStore receives in its place.
+func ParentIDsFromAgentMetadata(meta map[string]any) (toolUseID, parentAgentID string) {
+	if meta == nil {
+		return "", ""
+	}
+	return stringField(meta, "toolUseId"), stringField(meta, "parentAgentId")
+}
+
+// buildSubagentChain walks parentUuid links back from the last user or
+// assistant entry.
+//
+// Subagent transcripts are simpler than main sessions: no compaction, no
+// nested sidechains, no preserved segments. Unlike buildConversationChain
+// this accepts sidechain entries, since every entry here is one.
+func buildSubagentChain(entries []transcriptEntry) []transcriptEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	byUUID := make(map[string]transcriptEntry, len(entries))
+	for _, entry := range entries {
+		if entry.UUID != "" {
+			byUUID[entry.UUID] = entry
+		}
+	}
+
+	var leaf *transcriptEntry
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == "user" || entries[i].Type == "assistant" {
+			leaf = &entries[i]
+			break
+		}
+	}
+	if leaf == nil {
+		return nil
+	}
+
+	// Entries without uuids have no links to walk, so the walk below would
+	// stop at the leaf and drop the rest. Fall back to file order.
+	if leaf.UUID == "" {
+		var flat []transcriptEntry
+		for _, entry := range entries {
+			if entry.Type == "user" || entry.Type == "assistant" {
+				flat = append(flat, entry)
+			}
+		}
+		return flat
+	}
+
+	var chain []transcriptEntry
+	seen := make(map[string]bool)
+	for current := leaf; current != nil; {
+		if seen[current.UUID] {
+			break // Defensive: a malformed transcript must not loop forever.
+		}
+		seen[current.UUID] = true
+		chain = append(chain, *current)
+
+		parent, ok := byUUID[current.ParentUUID]
+		if !ok {
+			break
+		}
+		current = &parent
+	}
+
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain
+}
+
+// subagentEntriesToMessages converts subagent transcript entries to session
+// messages, stamping the shared parent ids onto each.
+func subagentEntriesToMessages(entries []transcriptEntry, toolUseID, parentAgentID string) []types.SessionMessage {
+	out := make([]types.SessionMessage, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type != "user" && entry.Type != "assistant" {
+			continue
+		}
+		msg := types.SessionMessage{
+			Type:          entry.Type,
+			UUID:          entry.UUID,
+			SessionID:     entry.SessionID,
+			Message:       entry.Message,
+			ParentAgentID: parentAgentID,
+			Data:          entry.Raw,
+		}
+		if toolUseID != "" {
+			id := toolUseID
+			msg.ParentToolUseID = &id
+		} else {
+			msg.ParentToolUseID = entry.ParentToolUseID
+		}
+		out = append(out, msg)
+	}
+	return out
 }
 
 // resolveSubagentsDir locates a session's subagent directory, returning "" if

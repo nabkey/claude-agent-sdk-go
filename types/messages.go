@@ -41,8 +41,12 @@ func (b *ServerToolResultBlock) isContentBlock() {}
 
 // ModelUsage is a per-model token and cost breakdown.
 type ModelUsage struct {
-	InputTokens              int     `json:"inputTokens"`
-	OutputTokens             int     `json:"outputTokens"`
+	InputTokens  int `json:"inputTokens"`
+	OutputTokens int `json:"outputTokens"`
+	// ThinkingTokens is already counted inside OutputTokens. It counts only
+	// turns run on CLI versions that record it, so it is zero when none did
+	// and partial for a session resumed from an older version.
+	ThinkingTokens           int     `json:"thinkingTokens,omitempty"`
 	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
 	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
 	WebSearchRequests        int     `json:"webSearchRequests"`
@@ -55,7 +59,24 @@ type ModelUsage struct {
 	// Provider is the API provider that served this model, e.g. firstParty,
 	// bedrock, vertex.
 	Provider string `json:"provider,omitempty"`
+	// CostBasis names the price table CostUSD was computed from. Empty until
+	// this process has priced a request for the model, and on CLI builds that
+	// predate the field; treat empty as CostBasisList.
+	CostBasis CostBasis `json:"costBasis,omitempty"`
 }
+
+// CostBasis names which price table a model's cost was computed from.
+type CostBasis string
+
+const (
+	// CostBasisList is Claude Code's built-in list pricing.
+	CostBasisList CostBasis = "list"
+	// CostBasisManaged is the organization's managed-settings modelPricing.
+	CostBasisManaged CostBasis = "managed"
+	// CostBasisUnknown means neither matched, so CostUSD is a guess at the
+	// default model's rate.
+	CostBasisUnknown CostBasis = "unknown"
+)
 
 // ModelUsageFromAny decodes the per-model usage map.
 func ModelUsageFromAny(raw any) map[string]ModelUsage {
@@ -78,8 +99,10 @@ func ModelUsageFromAny(raw any) map[string]ModelUsage {
 			CostUSD:                  mapFloat(m, "costUSD"),
 			ContextWindow:            mapInt(m, "contextWindow"),
 			MaxOutputTokens:          mapInt(m, "maxOutputTokens"),
+			ThinkingTokens:           mapInt(m, "thinkingTokens"),
 			CanonicalModel:           mapString(m, "canonicalModel"),
 			Provider:                 mapString(m, "provider"),
+			CostBasis:                CostBasis(mapString(m, "costBasis")),
 		}
 	}
 	return out
@@ -232,10 +255,45 @@ type ToolProgressMessage struct {
 	UUID      string         `json:"uuid,omitempty"`
 }
 
+// BackgroundTask is one entry in a background_tasks_changed snapshot.
+type BackgroundTask struct {
+	TaskID      string `json:"task_id"`
+	TaskType    string `json:"task_type,omitempty"`
+	Description string `json:"description,omitempty"`
+	// Ambient marks housekeeping work that a host should leave out of its
+	// activity indicators.
+	Ambient bool `json:"ambient,omitempty"`
+	// Raw is the full entry, including fields not modeled here.
+	Raw map[string]any `json:"-"`
+}
+
+// BackgroundTasksFromAny decodes a background task list.
+func BackgroundTasksFromAny(raw any) []BackgroundTask {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]BackgroundTask, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, BackgroundTask{
+			TaskID:      mapString(m, "task_id"),
+			TaskType:    mapString(m, "task_type"),
+			Description: mapString(m, "description"),
+			Ambient:     mapBool(m, "ambient"),
+			Raw:         m,
+		})
+	}
+	return out
+}
+
 // BackgroundTasksChangedMessage reports the live set of background tasks.
 type BackgroundTasksChangedMessage struct {
 	SystemMessage
-	Tasks     []map[string]any `json:"tasks,omitempty"`
+	Tasks     []BackgroundTask `json:"tasks,omitempty"`
 	SessionID string           `json:"session_id,omitempty"`
 	UUID      string           `json:"uuid,omitempty"`
 }
@@ -249,4 +307,73 @@ type PromptSuggestionMessage struct {
 	Suggestion string `json:"suggestion,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	UUID       string `json:"uuid,omitempty"`
+}
+
+// ConversationResetMessage is emitted when the session's conversation is
+// replaced without ending the connection -- after /clear, or any other flow
+// that discards the transcript mid-session.
+//
+// In streaming-input mode a single connection carries many user turns, and a
+// reset clears the history *and* zeroes the running totals reported on later
+// result messages (TotalCostUSD, ModelUsage). Snapshot those totals here if
+// the application accumulates them across a long-lived session.
+type ConversationResetMessage struct {
+	// NewConversationID keys the fresh, empty transcript. It is not the
+	// session_id of subsequent messages -- read that from the next message.
+	NewConversationID string `json:"new_conversation_id"`
+	UUID              string `json:"uuid,omitempty"`
+	// SessionID is the outgoing session; messages after the reset carry a new
+	// session id.
+	SessionID string `json:"session_id,omitempty"`
+}
+
+func (m *ConversationResetMessage) isMessage() {}
+
+// ThinkingTokensMessage reports the running estimate of thinking tokens
+// produced during a turn.
+type ThinkingTokensMessage struct {
+	SystemMessage
+	EstimatedTokens      int `json:"estimated_tokens,omitempty"`
+	EstimatedTokensDelta int `json:"estimated_tokens_delta,omitempty"`
+	// UserMessageUUID links the progress to the user message that triggered
+	// the turn. Empty on older CLI builds.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	UUID            string `json:"uuid,omitempty"`
+}
+
+// MCPResourceLink is a resource_link block an MCP tool returned, letting a
+// host render the files a call produced without parsing its result text.
+type MCPResourceLink struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	MIMEType    string `json:"mimeType,omitempty"`
+	// Raw is the full block, including fields not modeled here.
+	Raw map[string]any `json:"-"`
+}
+
+// MCPResourceLinksFromAny decodes a list of resource links.
+func MCPResourceLinksFromAny(raw any) []MCPResourceLink {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]MCPResourceLink, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, MCPResourceLink{
+			URI:         mapString(m, "uri"),
+			Name:        mapString(m, "name"),
+			Title:       mapString(m, "title"),
+			Description: mapString(m, "description"),
+			MIMEType:    mapString(m, "mimeType"),
+			Raw:         m,
+		})
+	}
+	return out
 }
