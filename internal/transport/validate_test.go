@@ -118,3 +118,32 @@ func TestWindowsGatesArePlatformConditional(t *testing.T) {
 		t.Errorf("clean resume value must always validate, got: %v", err)
 	}
 }
+
+// The SDK warns when the CLI is older than it supports, so the comparison has
+// to handle the shapes a real `claude -v` produces.
+func TestCompareVersions(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"2.1.263", "2.1.263", 0},
+		{"2.1.262", "2.1.263", -1},
+		{"2.1.264", "2.1.263", 1},
+		{"2.2.0", "2.1.263", 1},
+		{"1.9.9", "2.0.0", -1},
+		// A shorter version is padded with zeros rather than compared as
+		// text, so 2.1 is not "greater" than 2.1.263.
+		{"2.1", "2.1.263", -1},
+		{"2.1.263", "2.1", 1},
+		{"2", "2.0.0", 0},
+		// Double-digit components must not compare lexically.
+		{"2.1.9", "2.1.10", -1},
+		{"2.10.0", "2.9.0", 1},
+	}
+
+	for _, tc := range tests {
+		if got := compareVersions(tc.a, tc.b); got != tc.want {
+			t.Errorf("compareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

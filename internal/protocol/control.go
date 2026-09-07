@@ -7,8 +7,12 @@ import (
 )
 
 // GetContextUsage returns a breakdown of current context window usage.
-func (q *Query) GetContextUsage(ctx context.Context) (*types.ContextUsage, error) {
-	response, err := q.sendControlRequest(ctx, map[string]any{"subtype": "get_context_usage"})
+func (q *Query) GetContextUsage(ctx context.Context, detail types.ContextUsageDetail) (*types.ContextUsage, error) {
+	request := map[string]any{"subtype": "get_context_usage"}
+	if detail != "" {
+		request["detail"] = string(detail)
+	}
+	response, err := q.sendControlRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}

@@ -75,7 +75,7 @@ func appendToSession(absDir, sessionID string, entry map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("failed to open session file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	_, err = file.WriteString(string(data) + "\n")
 	if err != nil {

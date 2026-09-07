@@ -265,18 +265,32 @@ A **hook** is a Go function that the Claude Code *application* (*not* Claude) in
 
 #### Available Hook Events
 
+`types.AllHookEvents` lists every event the CLI dispatches. The most commonly
+used:
+
 | Event | Description |
 |-------|-------------|
 | `PreToolUse` | Before a tool is executed |
 | `PostToolUse` | After a tool is executed |
 | `PostToolUseFailure` | After a tool use fails |
+| `PostToolBatch` | After a parallel batch of tool calls completes |
 | `UserPromptSubmit` | When a user prompt is submitted |
-| `Stop` | When the session stops |
-| `SubagentStop` | When a subagent stops |
-| `SubagentStart` | When a subagent starts |
-| `PreCompact` | Before context compaction |
+| `UserPromptExpansion` | While a slash command or MCP prompt is expanded |
+| `SessionStart` / `SessionEnd` | When a session begins or ends |
+| `Stop` / `StopFailure` | When a turn ends, normally or in error |
+| `SubagentStart` / `SubagentStop` | When a subagent begins or ends |
+| `PreCompact` / `PostCompact` | Around context compaction |
+| `PreModelSwitch` / `PostModelSwitch` | Around a model change |
 | `Notification` | On notifications |
-| `PermissionRequest` | On permission requests |
+| `PermissionRequest` | On permission requests, which the hook may answer |
+| `PermissionDenied` | After a denial, which the hook may retry |
+
+The rest — `Setup`, `TeammateIdle`, `TaskCreated`, `TaskCompleted`,
+`Elicitation`, `ElicitationResult`, `ConfigChange`, `WorktreeCreate`,
+`WorktreeRemove`, `InstructionsLoaded`, `CwdChanged`, `FileChanged`,
+`DirectoryAdded`, `MessageDisplay` — are typed too. An event newer than this
+SDK arrives as `types.GenericHookInput` carrying the raw payload, so a
+callback registered for it still runs.
 
 #### Example
 
@@ -576,6 +590,19 @@ projectKey := claude.ProjectKeyForDirectory(".")
 sessions, _ := claude.ListSessionsFromStore(ctx, store, projectKey)
 ```
 
+Pairing `Resume` (or `ContinueConversation`) with a store resumes from it: the
+CLI only knows how to read a local transcript, so the SDK loads the session
+into a temporary `CLAUDE_CONFIG_DIR`, seeds it with the caller's credentials
+and user settings so the subprocess can still authenticate, and removes it when
+the session closes. `LoadTimeoutMS` bounds each store call during that load.
+
+```go
+options := &claude.AgentOptions{
+	SessionStore: store,
+	Resume:       claude.String(sessionID),
+}
+```
+
 See [examples/session_store](examples/session_store/main.go).
 
 ## Session Management
@@ -626,14 +653,14 @@ options := &claude.AgentOptions{
 
 See [types/](types/) for complete type definitions:
 
-- **Messages**: `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage`, `StreamEvent`, `RateLimitEvent`
+- **Messages**: `AssistantMessage`, `UserMessage`, `SystemMessage`, `ResultMessage`, `StreamEvent`, `RateLimitEvent`, `ConversationResetMessage`, `MessageOrigin`
 - **Task messages**: `TaskStartedMessage`, `TaskProgressMessage`, `TaskNotificationMessage`, `TaskUpdatedMessage`
-- **System messages**: `HookEventMessage`, `CompactBoundaryMessage`, `SessionStateChangedMessage`, `PermissionDeniedMessage`, `APIRetryMessage`, `StatusMessage`, `ToolProgressMessage`, `PromptSuggestionMessage`, `MirrorErrorMessage`
+- **System messages**: `HookEventMessage`, `CompactBoundaryMessage`, `SessionStateChangedMessage`, `PermissionDeniedMessage`, `APIRetryMessage`, `StatusMessage`, `ToolProgressMessage`, `ThinkingTokensMessage`, `PromptSuggestionMessage`, `BackgroundTasksChangedMessage`, `MirrorErrorMessage`
 - **Content blocks**: `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `ToolResultBlock`, `ServerToolUseBlock`, `ServerToolResultBlock`
-- **Results**: `ModelUsage`, `PermissionDenial`, `DeferredToolUse`, `TerminalReason`
+- **Results**: `ModelUsage`, `CostBasis`, `PermissionDenial`, `DeferredToolUse`, `TerminalReason`, `SDKContextUsage`
 - **Configuration**: `AgentOptions`, `AgentDefinition`, `ThinkingConfig`, `ThinkingDisplay`, `EffortLevel`, `SdkBeta`, `ToolConfig`
 - **MCP**: `MCPServerConfig`, `McpStatusResponse`, `McpServerStatus`, `McpToolInfo`
-- **Hooks**: `HookInput`, `HookOutput`, `HookCallback`, `HookMatcher`
+- **Hooks**: `HookInput`, `HookOutput`, `HookCallback`, `HookMatcher`, `GenericHookInput`, `AllHookEvents`
 - **Permissions**: `PermissionResult`, `PermissionUpdate`, `PermissionUpdateFromMap`, `ToolPermissionContext`
 - **Sessions**: `SDKSessionInfo`, `SessionMessage`, `SessionKey`, `SessionStoreEntry`, `SessionSummaryEntry`
 - **Control responses**: `InitializeResult`, `ContextUsage`, `RewindFilesResult`, `InterruptResult`, `SlashCommand`, `ModelInfo`, `AgentInfo`, `AccountInfo`
@@ -648,11 +675,16 @@ import "github.com/nabkey/claude-agent-sdk-go/errors"
 text, err := claude.QueryText(ctx, "Hello", nil)
 if err != nil {
 	var notFound *errors.CLINotFoundError
+	var resultErr *errors.ResultError
 	var processErr *errors.ProcessError
 
 	switch {
 	case errors.As(err, &notFound):
 		fmt.Println("Please install Claude Code")
+	case errors.As(err, &resultErr):
+		// The CLI reported a terminal error result and then exited non-zero.
+		// ResultError carries what it said, so no string matching is needed.
+		fmt.Printf("Run failed: %s (%s)\n", resultErr.Subtype, resultErr.TerminalReason)
 	case errors.As(err, &processErr):
 		fmt.Printf("Process failed with exit code: %d\n", processErr.ExitCode)
 	default:
@@ -660,6 +692,10 @@ if err != nil {
 	}
 }
 ```
+
+`ResultError` embeds `ProcessError`, and `CLINotFoundError` embeds
+`CLIConnectionError`, so `errors.As` against the broader type matches either
+way — check the specific one first.
 
 ## Available Tools
 

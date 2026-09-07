@@ -169,6 +169,18 @@ func InitializeResultFromMap(m map[string]any) *InitializeResult {
 	return result
 }
 
+// ContextUsageDetail selects how much work a context usage request does.
+type ContextUsageDetail string
+
+const (
+	// ContextUsageDetailFull counts tokens per category through the API. This
+	// is the CLI default.
+	ContextUsageDetailFull ContextUsageDetail = "full"
+	// ContextUsageDetailSummary answers from the last response's usage and
+	// local estimates, skipping the per-category token-count API calls.
+	ContextUsageDetailSummary ContextUsageDetail = "summary"
+)
+
 // ContextUsageCategory is one slice of the context window.
 type ContextUsageCategory struct {
 	Name       string `json:"name"`

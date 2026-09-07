@@ -55,7 +55,16 @@ type UserMessage struct {
 	Content         any            `json:"content"` // Can be string or []ContentBlock
 	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
 	UUID            *string        `json:"uuid,omitempty"`
+	SessionID       string         `json:"session_id,omitempty"`
 	ToolUseResult   map[string]any `json:"tool_use_result,omitempty"`
+	// Origin is the provenance of this message. Nil when the CLI did not
+	// attribute it. Populated on injected turns -- task notifications,
+	// channel and peer messages -- and on user messages the CLI replays;
+	// tool-result messages never carry it.
+	Origin *MessageOrigin `json:"origin,omitempty"`
+	// IsSynthetic marks a message the CLI generated rather than one the
+	// caller submitted.
+	IsSynthetic bool `json:"isSynthetic,omitempty"`
 }
 
 func (m *UserMessage) isMessage() {}
@@ -73,6 +82,17 @@ type AssistantMessage struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	UUID       string `json:"uuid,omitempty"`
+	// UserMessageUUID is the client uuid of the user message this reply
+	// answers, echoed back so a streaming-input consumer can bind a reply to
+	// its own send. Empty on older CLI builds and on synthetic turns.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists every user message whose prompt this turn
+	// consumed, in consumption order, for turns that merged several sends.
+	// Always contains UserMessageUUID when present.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
+	// ContextUsage is the structured payload behind a /context result, so a
+	// host can render the context card without parsing the markdown table.
+	ContextUsage *SDKContextUsage `json:"context_usage,omitempty"`
 }
 
 func (m *AssistantMessage) isMessage() {}
@@ -115,6 +135,22 @@ type ResultMessage struct {
 	// TerminalReason explains why the query loop stopped. An aborted reason
 	// means the turn was interrupted. Empty on CLIs that do not report it.
 	TerminalReason TerminalReason `json:"terminal_reason,omitempty"`
+	// Origin is the provenance of the user message that triggered this turn.
+	// It lets a streaming-input consumer tell the result of its own prompt
+	// (nil, or a human origin it stamped) from results of injected turns.
+	Origin *MessageOrigin `json:"origin,omitempty"`
+	// QueuedTurnCount is the number of user-initiated sends still waiting in
+	// the command queue when this result was produced. Greater than zero
+	// means another turn and result follow without further input. Nil when
+	// the CLI does not report it.
+	QueuedTurnCount *int `json:"queued_turn_count,omitempty"`
+	// UserMessageUUID is the client uuid of the user message that triggered
+	// this turn, echoed back as a join key.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists every user message whose prompt this turn
+	// consumed, in consumption order. Always contains UserMessageUUID when
+	// present; fall back to UserMessageUUID on older CLI builds.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
 }
 
 func (m *ResultMessage) isMessage() {}
@@ -125,6 +161,12 @@ type StreamEvent struct {
 	SessionID       string         `json:"session_id"`
 	Event           map[string]any `json:"event"`
 	ParentToolUseID *string        `json:"parent_tool_use_id,omitempty"`
+	// UserMessageUUID is the client uuid of the user message this turn
+	// answers, present on the first stream event of each turn.
+	UserMessageUUID string `json:"user_message_uuid,omitempty"`
+	// UserMessageUUIDs lists every user message whose prompt this turn
+	// consumed, when several sends were merged into one turn.
+	UserMessageUUIDs []string `json:"user_message_uuids,omitempty"`
 }
 
 func (m *StreamEvent) isMessage() {}
@@ -601,6 +643,24 @@ type TaskStartedMessage struct {
 	SessionID   string  `json:"session_id,omitempty"`
 	ToolUseID   string  `json:"tool_use_id,omitempty"`
 	TaskType    *string `json:"task_type,omitempty"`
+	// SubagentType names the agent this task runs, when it is a subagent.
+	SubagentType string `json:"subagent_type,omitempty"`
+	// IsBackgrounded reports whether the task runs without blocking the turn.
+	// Set for background subagents and background Bash tasks.
+	IsBackgrounded bool `json:"is_backgrounded,omitempty"`
+	// SpawnDepth is how deep the task sits in the subagent spawn tree, with 0
+	// meaning it was spawned by the main thread.
+	SpawnDepth int `json:"spawn_depth,omitempty"`
+	// WorkflowName names the workflow this task belongs to, if any.
+	WorkflowName string `json:"workflow_name,omitempty"`
+	// Prompt is the task's prompt, when the CLI reports it.
+	Prompt string `json:"prompt,omitempty"`
+	// SkipTranscript reports that the task's messages are not mirrored into
+	// the parent transcript.
+	SkipTranscript bool `json:"skip_transcript,omitempty"`
+	// Ambient marks housekeeping work a host should leave out of its activity
+	// indicators.
+	Ambient bool `json:"ambient,omitempty"`
 }
 
 // TaskProgressMessage represents a task progress system message.
@@ -626,6 +686,15 @@ type TaskNotificationMessage struct {
 	SessionID  string                 `json:"session_id,omitempty"`
 	ToolUseID  string                 `json:"tool_use_id,omitempty"`
 	Usage      *TaskUsage             `json:"usage,omitempty"`
+	// ResourceLinks lists files an auto-backgrounded MCP tool call returned
+	// by reference. Join to the originating call through ToolUseID.
+	ResourceLinks []MCPResourceLink `json:"resource_links,omitempty"`
+	// SkipTranscript reports that the task's messages are not mirrored into
+	// the parent transcript.
+	SkipTranscript bool `json:"skip_transcript,omitempty"`
+	// Ambient marks housekeeping work a host should leave out of its activity
+	// indicators.
+	Ambient bool `json:"ambient,omitempty"`
 }
 
 // ChannelMessage represents a message pushed by a channel server into the session.
@@ -670,8 +739,13 @@ type SessionMessage struct {
 	SessionID string `json:"session_id,omitempty"`
 	// Message is the raw API message (role, content, and so on).
 	Message any `json:"message,omitempty"`
-	// ParentToolUseID is set for tool-use sidechain messages.
+	// ParentToolUseID is set for tool-use sidechain messages. On a subagent
+	// transcript it is recovered from the subagent's metadata, linking each
+	// message to the Agent tool_use block in the parent session.
 	ParentToolUseID *string `json:"parent_tool_use_id,omitempty"`
+	// ParentAgentID is the id of the agent that spawned the subagent this
+	// message belongs to. Empty on main-session transcripts.
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
 	// Data is the full raw transcript line, including fields not modeled here.
 	Data map[string]any `json:"-"`
 }

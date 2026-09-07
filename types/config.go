@@ -25,6 +25,33 @@ type TaskBudget struct {
 	Total int `json:"total"`
 }
 
+// PermissionPromptsMode controls what the CLI does with a permission prompt
+// that no host is available to answer.
+type PermissionPromptsMode string
+
+const (
+	// PermissionPromptsHost routes prompts to the host, the CLI default.
+	PermissionPromptsHost PermissionPromptsMode = "host"
+	// PermissionPromptsNone auto-denies prompts, for sessions with nobody to
+	// answer them. Auto mode's classifier still runs, so calls it approves
+	// are unaffected; only what would have been asked is denied.
+	PermissionPromptsNone PermissionPromptsMode = "none"
+)
+
+// PluginDelivery selects how plugin configuration reaches the CLI.
+type PluginDelivery string
+
+const (
+	// PluginDeliveryArgv passes each plugin as a --plugin-dir flag. This is
+	// the default, and the only form older CLI builds understand.
+	PluginDeliveryArgv PluginDelivery = "argv"
+	// PluginDeliveryInitialize sends plugins on the initialize request
+	// instead, so the launch command line does not grow with the plugin
+	// count. Use it when many plugins would overflow the platform's command
+	// line limit, which is what fails first on Windows.
+	PluginDeliveryInitialize PluginDelivery = "initialize"
+)
+
 // SessionStoreFlushMode controls when transcript-mirror entries are flushed to
 // a SessionStore.
 type SessionStoreFlushMode string
@@ -56,15 +83,26 @@ const (
 // ElicitationRequest is an MCP server's request for user input.
 type ElicitationRequest struct {
 	// ServerName is the MCP server making the request.
-	ServerName string `json:"server_name,omitempty"`
+	ServerName string `json:"mcp_server_name,omitempty"`
 	// Mode distinguishes form input from URL-based flows.
 	Mode ElicitationMode `json:"mode,omitempty"`
 	// Message is the human-readable prompt.
 	Message string `json:"message,omitempty"`
 	// RequestedSchema is the JSON Schema of the requested fields, for form mode.
-	RequestedSchema map[string]any `json:"requestedSchema,omitempty"`
+	RequestedSchema map[string]any `json:"requested_schema,omitempty"`
 	// URL is the address to visit, for URL mode.
 	URL string `json:"url,omitempty"`
+	// ElicitationID identifies this request, so a host can correlate it with
+	// the matching ElicitationResult hook event.
+	ElicitationID string `json:"elicitation_id,omitempty"`
+	// Title is the permission-display title from the MCP server's
+	// _meta["anthropic/permissionDisplay"], so a host can render a structured
+	// header instead of parsing Message.
+	Title string `json:"title,omitempty"`
+	// DisplayName is a short tool or server label from the same metadata.
+	DisplayName string `json:"display_name,omitempty"`
+	// Description is the permission-display subtitle from the same metadata.
+	Description string `json:"description,omitempty"`
 	// Raw is the full request payload, including fields not modeled here.
 	Raw map[string]any `json:"-"`
 }

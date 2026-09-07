@@ -49,7 +49,7 @@ func createInitialSession(ctx context.Context) string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Connect(ctx, ""); err != nil {
 		log.Fatal(err)
@@ -97,7 +97,7 @@ func resumeSession(ctx context.Context, sessionID string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Connect(ctx, ""); err != nil {
 		log.Fatal(err)
@@ -141,7 +141,7 @@ func continueConversation(ctx context.Context) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := client.Connect(ctx, ""); err != nil {
 		log.Fatal(err)

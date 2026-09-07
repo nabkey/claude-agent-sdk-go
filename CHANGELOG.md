@@ -7,6 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — sync with Python 0.2.152 and TypeScript 0.3.263
+
+Both reference SDKs were read in full: the Python source tree, and for
+TypeScript the runtime bundle (`sdk.mjs`) alongside `sdk.d.ts`, so the argv
+and control-protocol changes below match what the reference code emits rather
+than only what its types describe.
+
+**Messages**
+
+- `conversation_reset` is surfaced as `types.ConversationResetMessage`. A
+  reset clears the transcript *and* zeroes the running totals on later result
+  messages, so an application accumulating `TotalCostUSD` or `ModelUsage`
+  across a long-lived session needs to see the frame.
+- `types.MessageOrigin` on `UserMessage` and `ResultMessage`. In
+  streaming-input mode one connection interleaves the turns the caller sends
+  with turns the session injects on its own — background-task notifications,
+  scheduled prompts, channel and peer messages — and origin tells them apart.
+  A nil origin means the CLI did not attribute the message, which is not the
+  same as attributing it to a human.
+- `ModelUsage` gains `ThinkingTokens` and `CostBasis`.
+- `ResultMessage` gains `QueuedTurnCount`, `UserMessageUUID`, and
+  `UserMessageUUIDs`; `AssistantMessage` gains those two uuid join keys plus a
+  structured `ContextUsage` (`types.SDKContextUsage`) for `/context` results;
+  `StreamEvent` gains the uuid join keys.
+- `TaskStartedMessage` gains `IsBackgrounded`, `SpawnDepth`, `Ambient`,
+  `SubagentType`, `WorkflowName`, `Prompt`, and `SkipTranscript`;
+  `TaskNotificationMessage` gains `ResourceLinks`, `Ambient`, and
+  `SkipTranscript`. `BackgroundTasksChangedMessage.Tasks` is now
+  `[]types.BackgroundTask` rather than raw maps, and carries `Ambient`.
+- New `thinking_tokens` system message (`types.ThinkingTokensMessage`).
+- `SessionMessage` gains `ParentAgentID`.
+
+**Options**
+
+`ResumeDropsTurn`, `PermissionPrompts`, `PerTaskStopAffordance`, and
+`PluginDelivery`. Under `types.PluginDeliveryInitialize` plugins travel on the
+initialize request instead of as `--plugin-dir` flags, so the launch command
+line no longer grows with the plugin count — which is what fails first on
+Windows. A CLI that does not report `plugins_applied` is warned about rather
+than silently running with no plugins at all.
+
+**SDK MCP servers**
+
+`mcp.NewSDKServerWithOptions` adds `WithInstructions`, `WithToolTimeout` (a
+per-server override for `MCP_TOOL_TIMEOUT`), and `WithAlwaysLoad`, plus
+per-tool `Tool.AlwaysLoad`. The timeout travels on `initialize` as
+`sdkMcpServerConfigs`, on `mcp_set_servers`, and in `--mcp-config`, which now
+carries every descriptive field of an SDK server rather than only its name.
+
+`Client.GetContextUsageSummary` answers from the last response's usage and
+local estimates instead of running per-category token-count API calls.
+
+### Fixed
+
+- **`SessionStore`-backed resume now works.** `Resume` and
+  `ContinueConversation` paired with a store previously did nothing: the CLI
+  only knows how to read a local transcript, and the session lives in the
+  store. It is now materialized into a temporary `CLAUDE_CONFIG_DIR`, seeded
+  with the caller's credentials (refresh token redacted so the subprocess
+  cannot consume it out from under the parent), `.claude.json`, and
+  `settings.json` / `cowork_settings.json` — without the settings a host
+  authenticating solely through `apiKeyHelper` failed with "Not logged in".
+  Subagent transcripts are materialized too, and a store-supplied subpath that
+  would escape the session directory is refused. `LoadTimeoutMS` now bounds
+  each store call, as its documentation already claimed.
+
+- **Subagent transcript reads returned nothing.** `GetSubagentMessages` and
+  `GetSubagentMessagesFromStore` filtered sidechain entries, and every entry in
+  a subagent transcript is sidechain by construction. They now build the
+  subagent chain directly, and recover `ParentToolUseID` and the new
+  `ParentAgentID` from the transcript's `.meta.json` sidecar, or from the
+  store's synthetic `agent_metadata` entry.
+
+- **Hooks for 20 of the 31 events never ran.** An event without a dedicated
+  input type failed to parse, so the CLI received an error instead of the
+  callback's decision. Typed inputs were added for `SessionStart`,
+  `SessionEnd`, `PostCompact`, `PermissionDenied`, `UserPromptExpansion`,
+  `StopFailure`, `PostToolBatch`, `Setup`, `TaskCreated`, `TaskCompleted`,
+  `TeammateIdle`, `ConfigChange`, `CwdChanged`, `FileChanged`,
+  `DirectoryAdded`, `MessageDisplay`, `InstructionsLoaded`, `WorktreeCreate`,
+  `WorktreeRemove`, `Elicitation`, `ElicitationResult`, `PreModelSwitch`, and
+  `PostModelSwitch`; anything still unmodeled now reaches the callback as
+  `types.GenericHookInput`.
+
+- **Elicitation requests were decoded with the wrong keys.** The CLI sends
+  `mcp_server_name` and `requested_schema`; the SDK read `server_name` and
+  `requestedSchema`, so `ServerName` was always empty and `RequestedSchema`
+  never populated. `ElicitationID`, `Title`, `DisplayName`, and `Description`
+  are now carried too.
+
+- An MCP `notifications/initialized` acknowledgement carried no `id`, making
+  it a malformed JSON-RPC response.
+
+### Security
+
+- **Skill names are validated.** Names from `AgentOptions.Skills` were
+  formatted unchecked into the `--allowedTools` value, which the CLI splits
+  into rules on commas and spaces outside parentheses. That tokenizer honors
+  no escapes, so a crafted name could inject additional permission rules.
+  Names that tokenize cleanly but can never match the named skill — leading
+  `/`, surrounding whitespace, wildcards — are rejected too, so a rule that
+  would silently grant nothing fails loudly instead. `Skills` set to anything
+  other than a `[]string` or `types.SkillsAll` is also refused, since it would
+  install no skill filter at all. **Breaking:** `Skills: []string{"plugin:*"}`
+  and `[]string{"*"}` must become `types.SkillsAll`.
+- `SessionID` joins `Resume` in rejecting cmd.exe metacharacters on Windows.
+  Applications commonly take both from external input.
+
+### Changed
+
+- `errors.ResultError` replaces the bare "exit code 1" `ProcessError` after a
+  terminal error result, carrying `Subtype`, `Errors`, `Result`,
+  `APIErrorStatus`, `TerminalReason`, `SessionID`, and the raw payload, so a
+  caller can branch on why a run failed without matching on strings. It embeds
+  `ProcessError`, and `errors.As` against `*ProcessError` matches it.
+- `CLINotFoundError` now matches `errors.As` against `*CLIConnectionError`.
+  Go matches concrete types rather than embedding, so the hierarchy was
+  previously decorative.
+- Hook outputs gain `classifierContext` on `PostToolUse`,
+  `suppressOriginalPrompt` and `sessionTitle` on `UserPromptSubmit`, and the
+  `UserPromptExpansion`, `SessionStart`, `PermissionRequest`,
+  `PermissionDenied`, and additional-context output shapes.
+- Tests grew from 117 to 317 functions, covering the packages that had none
+  (`mcp`, `errors`) and the paths that had no coverage (the `Client` control
+  surface, the transcript mirror, resume materialization, hook dispatch).
+- `.golangci.yml` migrated to the v2 schema. CI installs the latest release,
+  which no longer reads the v1 format, so the lint job could not start.
+
 ### Added — streaming transport, control surface, and session store
 
 Brings the SDK to parity with the Python (0.2.128) and TypeScript (0.3.220)
