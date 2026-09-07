@@ -114,6 +114,12 @@ type MCPServerHandler struct {
 	Version  string
 	Instance any
 	Tools    []MCPTool
+	// Instructions are returned from the MCP initialize response and reach
+	// the model as an instructions block. Empty means none.
+	Instructions string
+	// TimeoutMS is a per-server tool-call timeout, overriding
+	// MCP_TOOL_TIMEOUT for this server. Zero leaves the CLI default.
+	TimeoutMS int
 }
 
 // MCPTool represents a tool in an MCP server.
@@ -362,6 +368,18 @@ func (q *Query) Initialize(ctx context.Context) (map[string]any, error) {
 		}
 		sort.Strings(names)
 		request["sdkMcpServers"] = names
+
+		// A per-server timeout travels alongside the names, so the CLI can
+		// apply it when it first registers the server.
+		configs := make(map[string]any)
+		for _, name := range names {
+			if timeout := q.sdkMCPServers[name].TimeoutMS; timeout > 0 {
+				configs[name] = map[string]any{"timeout": timeout}
+			}
+		}
+		if len(configs) > 0 {
+			request["sdkMcpServerConfigs"] = configs
+		}
 	}
 	q.initConfig.apply(request)
 
@@ -509,7 +527,7 @@ func (q *Query) trackLifecycle(msg map[string]any, msgType string) {
 		// Anything other than the post-turn session_state_changed marker means
 		// the conversation moved on, so a later process error is a fresh crash
 		// rather than the expected exit from a prior error result.
-		if !(msgType == "system" && getString(msg, "subtype") == "session_state_changed") {
+		if msgType != "system" || getString(msg, "subtype") != "session_state_changed" {
 			q.lastErrorResult = nil
 		}
 		return
@@ -902,14 +920,26 @@ func (q *Query) handleElicitation(ctx context.Context, request map[string]any) (
 		return map[string]any{"action": string(types.ElicitationDecline)}, nil
 	}
 
-	req := types.ElicitationRequest{
-		ServerName: getString(request, "server_name"),
-		Mode:       types.ElicitationMode(getString(request, "mode")),
-		Message:    getString(request, "message"),
-		URL:        getString(request, "url"),
-		Raw:        request,
+	// The CLI sends these snake_case; the camelCase spellings are tolerated
+	// in case another build emits them.
+	serverName := getString(request, "mcp_server_name")
+	if serverName == "" {
+		serverName = getString(request, "server_name")
 	}
-	if schema, ok := request["requestedSchema"].(map[string]any); ok {
+	req := types.ElicitationRequest{
+		ServerName:    serverName,
+		Mode:          types.ElicitationMode(getString(request, "mode")),
+		Message:       getString(request, "message"),
+		URL:           getString(request, "url"),
+		ElicitationID: getString(request, "elicitation_id"),
+		Title:         getString(request, "title"),
+		DisplayName:   getString(request, "display_name"),
+		Description:   getString(request, "description"),
+		Raw:           request,
+	}
+	if schema := getMap(request, "requested_schema"); schema != nil {
+		req.RequestedSchema = schema
+	} else if schema := getMap(request, "requestedSchema"); schema != nil {
 		req.RequestedSchema = schema
 	}
 
@@ -1227,20 +1257,20 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 
 	switch method {
 	case "initialize":
-		return map[string]any{
-			"jsonrpc": "2.0",
-			"id":      id,
-			"result": map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities": map[string]any{
-					"tools": map[string]any{},
-				},
-				"serverInfo": map[string]any{
-					"name":    h.Name,
-					"version": h.Version,
-				},
+		result := map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities": map[string]any{
+				"tools": map[string]any{},
+			},
+			"serverInfo": map[string]any{
+				"name":    h.Name,
+				"version": h.Version,
 			},
 		}
+		if h.Instructions != "" {
+			result["instructions"] = h.Instructions
+		}
+		return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 
 	case "tools/list":
 		tools := make([]map[string]any, len(h.Tools))
@@ -1298,7 +1328,10 @@ func (h *MCPServerHandler) HandleRequest(ctx context.Context, message map[string
 		}
 
 	case "notifications/initialized":
-		return map[string]any{"jsonrpc": "2.0", "result": map[string]any{}}
+		// A JSON-RPC notification carries no id, but the CLI wraps it in a
+		// control request that still needs an answer, so it is acknowledged
+		// with the id-zero form the reference SDKs send.
+		return map[string]any{"jsonrpc": "2.0", "id": 0, "result": map[string]any{}}
 
 	default:
 		return map[string]any{

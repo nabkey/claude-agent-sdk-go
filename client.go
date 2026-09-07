@@ -413,7 +413,14 @@ func (c *Client) SetMCPServers(ctx context.Context, servers map[string]types.MCP
 	wire := make(map[string]any, len(servers))
 	for name, config := range servers {
 		if sdk, ok := config.(*types.SDKMCPServer); ok {
-			wire[name] = map[string]any{"type": "sdk", "name": sdk.Name}
+			// An in-process server is named, not described: the SDK already
+			// holds the instance and answers its calls over the control
+			// channel. Only the per-server timeout has to travel.
+			entry := map[string]any{"type": "sdk", "name": sdk.Name}
+			if sdk.TimeoutMS > 0 {
+				entry["timeout"] = sdk.TimeoutMS
+			}
+			wire[name] = entry
 			continue
 		}
 		wire[name] = config

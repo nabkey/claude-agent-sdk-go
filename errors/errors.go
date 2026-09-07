@@ -44,6 +44,11 @@ type CLINotFoundError struct {
 	CLIPath string
 }
 
+// Unwrap exposes the embedded CLIConnectionError, so errors.As against
+// *CLIConnectionError matches a CLINotFoundError. Go matches concrete types
+// rather than embedding, so without this the hierarchy would be decorative.
+func (e *CLINotFoundError) Unwrap() error { return &e.CLIConnectionError }
+
 // NewCLINotFoundError creates a new CLINotFoundError.
 func NewCLINotFoundError(message string, cliPath string) *CLINotFoundError {
 	if cliPath != "" {
@@ -126,6 +131,12 @@ type ResultError struct {
 	// Data is the raw result payload as the CLI emitted it.
 	Data map[string]any
 }
+
+// Unwrap exposes the embedded ProcessError, so errors.As against
+// *ProcessError matches a ResultError -- the relationship Python's SDK gets
+// from subclassing. From there the chain continues to whatever caused the
+// process to exit.
+func (e *ResultError) Unwrap() error { return &e.ProcessError }
 
 // NewResultError builds a ResultError from a raw result frame.
 //
